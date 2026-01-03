@@ -14,7 +14,7 @@ const appendBtn = document.getElementById("appendImageBtn");
 
 // Optional ranks UI (if present in your HTML)
 const ranksEl = document.getElementById("ranks") || document.getElementById("gangRanks");
-const saveRanksBtn = document.getElementById("saveRanks");
+const saveRanksBtn = document.getElementById("saveRanksBtn");
 
 let cropper = null;
 let currentObjectUrl = null;
@@ -515,8 +515,13 @@ function loadRanks() {
 
 function saveRanks() {
   if (!ranksEl) return;
-  localStorage.setItem("osrp_ranks", (ranksEl.value || "").trim());
-  setStatus("Ranks saved.");
+  try {
+    localStorage.setItem("osrp_ranks", (ranksEl.value || "").trim());
+    setStatus("Ranks saved.");
+  } catch (e) {
+    console.error("localStorage blocked:", e);
+    setStatus("Ranks NOT saved (browser blocked storage / private mode).");
+  }
 }
 
 if (saveRanksBtn) saveRanksBtn.addEventListener("click", saveRanks);
