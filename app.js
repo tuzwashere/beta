@@ -72,6 +72,32 @@ function cleanupImage() {
   setStatus("Waiting for image…");
 }
 
+function maskTableNoise(canvas) {
+  const ctx = canvas.getContext("2d");
+
+  // White-out the left junk: row #, avatar, status dot
+  ctx.fillStyle = "white";
+  ctx.fillRect(0, 0, Math.floor(canvas.width * 0.12), canvas.height);
+
+  // White-out the right junk: the 3-dot menu column
+  ctx.fillRect(
+    Math.floor(canvas.width * 0.94),
+    0,
+    Math.ceil(canvas.width * 0.06),
+    canvas.height
+  );
+
+  // Optional: lightly nuke the rank badge icon area (inside MEMBER RANKS column)
+  ctx.fillRect(
+    Math.floor(canvas.width * 0.5),
+    0,
+    Math.floor(canvas.width * 0.06),
+    canvas.height
+  );
+
+  return canvas;
+}
+
 function getRankHints() {
   const el =
     document.getElementById("rankHints") ||
@@ -299,8 +325,7 @@ function parseRowsFromTesseract(data, tableWidth, tableHeight) {
   const rankList = getRankList();
 
   const words = (data.words || [])
-    .filter((w) => (w.text || "").trim().length > 0)
-    .filter((w) => (w.confidence ?? 0) >= 40);
+    .filter((w) => (w.text || "").trim().length > 0);
 
   if (!words.length) return [];
 
@@ -592,6 +617,8 @@ extractBtn.addEventListener("click", async () => {
       imageSmoothingEnabled: true,
       imageSmoothingQuality: "high",
     });
+
+    maskTableNoise(canvas);
 
     const ocrCanvas = upscaleCanvas(canvas, 2);
     const data = await doOCR(ocrCanvas);
