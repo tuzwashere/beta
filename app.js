@@ -30,33 +30,114 @@ function normalizeHonor(s) {
   return s.replace(/[,\s]/g, "");
 }
 
-function parseRows(ocrText) {
-  // Works best when crop is tight around the table.
-  // We extract repeated matches from raw OCR text.
-  const text = ocrText
-    .replace(/\r/g, "\n")
-    .replace(/[|]/g, " ")
-    .replace(/\u00A0/g, " ")
-    .replace(/\s+/g, " ");
+function parseRows(words, imageWidth) {
+  if (!Array.isArray(words) || !words.length || !imageWidth) return [];
 
-  // Activity patterns: Online, "7 m.", "2 h.", "1 d."
-  // Honor: digits possibly with spaces
-  // Name: words + numbers + underscores + apostrophes
-  // Rank: words/spaces
-  const re = /([A-Za-z][A-Za-z0-9_ ']+?)\s+(\d{1,2})\s+([A-Za-z][A-Za-z ]+?)\s+(\d[\d\s,]{0,12}\d|\d+)\s+(Online|\d+\s*[mhd]\.?)/g;
+  const cleanedWords = words.filter((w) => w && w.text && w.bbox);
+  if (!cleanedWords.length) return [];
+
+  const avgHeight =
+    cleanedWords.reduce((sum, w) => sum + (w.bbox.y1 - w.bbox.y0), 0) /
+    cleanedWords.length;
+  let rowHeightThreshold = Math.round(avgHeight * 0.8);
+  if (rowHeightThreshold < 18) rowHeightThreshold = 18;
+  if (avgHeight <= 30 && rowHeightThreshold > 24) rowHeightThreshold = 24;
+
+  const anchors = cleanedWords
+    .filter((w) => {
+      const text = w.text.trim();
+      if (!/^\d+$/.test(text)) return false;
+      const num = parseInt(text, 10);
+      if (Number.isNaN(num) || num < 1 || num > 45) return false;
+      const xCenter = (w.bbox.x0 + w.bbox.x1) / 2;
+      return xCenter < 0.1 * imageWidth;
+    })
+    .sort(
+      (a, b) =>
+        (a.bbox.y0 + a.bbox.y1) / 2 - (b.bbox.y0 + b.bbox.y1) / 2,
+    );
+
+  const headerTokens = new Set(["MEMBERS", "LVL", "RANKS", "HONOR", "ACTIVITY"]);
 
   const rows = [];
-  let m;
-  while ((m = re.exec(text)) !== null) {
-    const name = m[1].trim();
-    const lvl = parseInt(m[2], 10);
-    const rank = m[3].trim().replace(/\s+/g, " ");
-    const honor = parseInt(normalizeHonor(m[4]), 10);
-    const activity = m[5].trim().toLowerCase() === "online" ? "online" : m[5].trim();
+  for (const anchor of anchors) {
+    const anchorY = (anchor.bbox.y0 + anchor.bbox.y1) / 2;
+    const rowWords = cleanedWords.filter((w) => {
+      const yCenter = (w.bbox.y0 + w.bbox.y1) / 2;
+      return Math.abs(yCenter - anchorY) <= rowHeightThreshold;
+    });
 
-    if (!name || Number.isNaN(lvl) || Number.isNaN(honor)) continue;
-    rows.push({ name, lvl, rank, honor, activity });
+    const filteredWords = rowWords.filter((w) => {
+      if (w === anchor) return false;
+      if (!/^\d+$/.test(w.text.trim())) return true;
+      const xCenter = (w.bbox.x0 + w.bbox.x1) / 2;
+      return !(w.text.trim() === anchor.text.trim() && xCenter < 0.1 * imageWidth);
+    });
+
+    if (
+      filteredWords.some((w) =>
+        headerTokens.has(w.text.trim().toUpperCase()),
+      )
+    ) {
+      continue;
+    }
+
+    const columns = {
+      name: [],
+      lvl: [],
+      rank: [],
+      honor: [],
+      activity: [],
+    };
+
+    for (const w of filteredWords) {
+      const xCenter = (w.bbox.x0 + w.bbox.x1) / 2;
+      const ratio = xCenter / imageWidth;
+      if (ratio >= 0.1 && ratio < 0.4) columns.name.push(w);
+      else if (ratio >= 0.4 && ratio < 0.52) columns.lvl.push(w);
+      else if (ratio >= 0.52 && ratio < 0.72) columns.rank.push(w);
+      else if (ratio >= 0.72 && ratio < 0.86) columns.honor.push(w);
+      else if (ratio >= 0.86 && ratio <= 1) columns.activity.push(w);
+    }
+
+    const joinByX = (list) =>
+      list
+        .slice()
+        .sort((a, b) => (a.bbox.x0 + a.bbox.x1) / 2 - (b.bbox.x0 + b.bbox.x1) / 2)
+        .map((w) => w.text)
+        .join(" ")
+        .trim();
+
+    const name = joinByX(columns.name);
+    const lvlText = joinByX(columns.lvl);
+    const lvlMatch = lvlText.match(/\d+/);
+    const lvl = lvlMatch ? parseInt(lvlMatch[0], 10) : NaN;
+    const rank = joinByX(columns.rank);
+
+    const honorText = joinByX(columns.honor).replace(/\D/g, "");
+    const honor = honorText ? parseInt(honorText, 10) : NaN;
+
+    let activityText = joinByX(columns.activity);
+    if (/online/i.test(activityText)) {
+      activityText = "Online";
+    } else {
+      activityText = activityText
+        .replace(/\s+/g, " ")
+        .trim()
+        .replace(/(\d+)\s*([mhd])\.?/gi, (_, num, unit) => `${num}${unit.toLowerCase()}`);
+    }
+
+    if (!name || Number.isNaN(lvl) || !rank || Number.isNaN(honor)) continue;
+
+    rows.push({
+      name,
+      lvl,
+      rank,
+      honor,
+      activity: activityText,
+    });
   }
+
   return rows;
 }
 
@@ -70,7 +151,7 @@ async function doOCR(canvas) {
       }
     },
   });
-  return data.text || "";
+  return data;
 }
 
 fileEl.addEventListener("change", () => {
@@ -118,10 +199,10 @@ extractBtn.addEventListener("click", async () => {
       imageSmoothingQuality: "high",
     });
 
-    const text = await doOCR(canvas);
-    rawEl.value = text;
+    const data = await doOCR(canvas);
+    rawEl.value = data.text || "";
 
-    const rows = parseRows(text);
+    const rows = parseRows(data.words, canvas.width);
     if (!rows.length) {
       setStatus("No rows detected. Crop tighter around the table and try again.");
       extractBtn.disabled = false;
