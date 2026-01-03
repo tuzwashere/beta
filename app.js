@@ -1,131 +1,163 @@
-const fileInput = document.getElementById("file-input");
-const previewImage = document.getElementById("preview-image");
-const extractButton = document.getElementById("extract-btn");
-const copyButton = document.getElementById("copy-btn");
-const output = document.getElementById("csv-output");
-const progressBar = document.getElementById("ocr-progress");
-const statusText = document.getElementById("status-text");
+const fileEl = document.getElementById("file");
+const imgEl = document.getElementById("img");
+const extractBtn = document.getElementById("extract");
+const copyBtn = document.getElementById("copy");
+const clearBtn = document.getElementById("clear");
+const csvEl = document.getElementById("csv");
+const rawEl = document.getElementById("raw");
+const statusEl = document.getElementById("status");
 
 let cropper = null;
+let currentObjectUrl = null;
 
-const setStatus = (message) => {
-  statusText.textContent = message;
-};
+function setStatus(t){ statusEl.textContent = t; }
 
-const resetProgress = () => {
-  progressBar.value = 0;
-};
+function cleanupImage() {
+  if (cropper) { cropper.destroy(); cropper = null; }
+  if (currentObjectUrl) { URL.revokeObjectURL(currentObjectUrl); currentObjectUrl = null; }
+  imgEl.style.display = "none";
+  imgEl.src = "";
+  extractBtn.disabled = true;
+  copyBtn.disabled = true;
+  clearBtn.disabled = true;
+  csvEl.value = "";
+  rawEl.value = "";
+  setStatus("Waiting for image…");
+}
 
-const enableActions = (enabled) => {
-  extractButton.disabled = !enabled;
-  copyButton.disabled = !enabled;
-};
+function normalizeHonor(s) {
+  // "26 200" -> "26200", "1,020" -> "1020"
+  return s.replace(/[,\s]/g, "");
+}
 
-fileInput.addEventListener("change", () => {
-  const file = fileInput.files[0];
-  if (!file) {
-    return;
+function parseRows(ocrText) {
+  // Works best when crop is tight around the table.
+  // We extract repeated matches from raw OCR text.
+  const text = ocrText
+    .replace(/\r/g, "\n")
+    .replace(/[|]/g, " ")
+    .replace(/\u00A0/g, " ")
+    .replace(/\s+/g, " ");
+
+  // Activity patterns: Online, "7 m.", "2 h.", "1 d."
+  // Honor: digits possibly with spaces
+  // Name: words + numbers + underscores + apostrophes
+  // Rank: words/spaces
+  const re = /([A-Za-z][A-Za-z0-9_ ']+?)\s+(\d{1,2})\s+([A-Za-z][A-Za-z ]+?)\s+(\d[\d\s,]{0,12}\d|\d+)\s+(Online|\d+\s*[mhd]\.?)/g;
+
+  const rows = [];
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const name = m[1].trim();
+    const lvl = parseInt(m[2], 10);
+    const rank = m[3].trim().replace(/\s+/g, " ");
+    const honor = parseInt(normalizeHonor(m[4]), 10);
+    const activity = m[5].trim().toLowerCase() === "online" ? "online" : m[5].trim();
+
+    if (!name || Number.isNaN(lvl) || Number.isNaN(honor)) continue;
+    rows.push({ name, lvl, rank, honor, activity });
   }
+  return rows;
+}
 
-  const reader = new FileReader();
-  reader.onload = () => {
-    previewImage.src = reader.result;
-    if (cropper) {
-      cropper.destroy();
-    }
-    cropper = new Cropper(previewImage, {
+async function doOCR(canvas) {
+  setStatus("OCR running…");
+  const { data } = await Tesseract.recognize(canvas, "eng", {
+    logger: (m) => {
+      if (m.status) {
+        const pct = m.progress ? ` (${Math.round(m.progress * 100)}%)` : "";
+        setStatus(`${m.status}${pct}`);
+      }
+    },
+  });
+  return data.text || "";
+}
+
+fileEl.addEventListener("change", () => {
+  const f = fileEl.files && fileEl.files[0];
+  if (!f) return;
+
+  if (cropper) { cropper.destroy(); cropper = null; }
+  if (currentObjectUrl) URL.revokeObjectURL(currentObjectUrl);
+
+  currentObjectUrl = URL.createObjectURL(f);
+  imgEl.src = currentObjectUrl;
+  imgEl.style.display = "block";
+  setStatus("Image loaded. Crop to the table, then Extract.");
+
+  imgEl.onload = () => {
+    cropper = new Cropper(imgEl, {
       viewMode: 1,
-      autoCropArea: 0.8,
+      autoCropArea: 0.85,
+      movable: true,
+      zoomable: true,
+      rotatable: false,
+      scalable: false,
       responsive: true,
       background: false,
     });
-    enableActions(true);
-    setStatus("Crop the table region, then extract.");
+
+    extractBtn.disabled = false;
+    clearBtn.disabled = false;
+    copyBtn.disabled = true;
+    csvEl.value = "";
+    rawEl.value = "";
   };
-  reader.readAsDataURL(file);
 });
 
-const normalizeHonor = (value) => value.replace(/\s+/g, "");
+extractBtn.addEventListener("click", async () => {
+  if (!cropper) return;
 
-const normalizeActivity = (value) => {
-  if (/online/i.test(value)) {
-    return "online";
-  }
-  return value.replace(/\s+/g, "");
-};
-
-const parseRows = (text) => {
-  const results = [];
-  const pattern =
-    /([A-Za-z][A-Za-z ]+?)\s+(\d+)\s+([A-Za-z ]+?)\s+([\d ]+)\s+(Online|\d+\s*[mhd]\.)/gi;
-  let match;
-  while ((match = pattern.exec(text)) !== null) {
-    const name = match[1].trim().replace(/\s+/g, " ");
-    const lvl = match[2];
-    const rank = match[3].trim().replace(/\s+/g, " ");
-    const honor = normalizeHonor(match[4]);
-    const activity = normalizeActivity(match[5]);
-    results.push(`${name},${lvl},${rank},${honor},${activity}`);
-  }
-  return results;
-};
-
-extractButton.addEventListener("click", async () => {
-  if (!cropper) {
-    return;
-  }
-
-  resetProgress();
-  setStatus("Preparing OCR…");
-  extractButton.disabled = true;
-  copyButton.disabled = true;
-
-  const canvas = cropper.getCroppedCanvas({
-    imageSmoothingEnabled: true,
-    imageSmoothingQuality: "high",
-  });
-  const dataUrl = canvas.toDataURL("image/png");
+  extractBtn.disabled = true;
+  copyBtn.disabled = true;
 
   try {
-    const result = await Tesseract.recognize(dataUrl, "eng", {
-      logger: (message) => {
-        if (message.status) {
-          setStatus(message.status);
-        }
-        if (message.progress) {
-          progressBar.value = message.progress;
-        }
-      },
+    setStatus("Preparing crop…");
+    const canvas = cropper.getCroppedCanvas({
+      imageSmoothingEnabled: true,
+      imageSmoothingQuality: "high",
     });
 
-    const rawText = result.data.text || "";
-    const rows = parseRows(rawText);
-    const header = "name,lvl,rank,honor,activity";
-    output.value = [header, ...rows].join("\n");
+    const text = await doOCR(canvas);
+    rawEl.value = text;
 
-    if (rows.length === 0) {
-      setStatus("No rows detected. Try a tighter crop or clearer screenshot.");
-    } else {
-      setStatus(`Extracted ${rows.length} row(s).`);
+    const rows = parseRows(text);
+    if (!rows.length) {
+      setStatus("No rows detected. Crop tighter around the table and try again.");
+      extractBtn.disabled = false;
+      return;
     }
-  } catch (error) {
-    setStatus("OCR failed. Please try again.");
-    console.error(error);
+
+    const csvLines = ["name,lvl,rank,honor,activity"];
+    for (const r of rows) {
+      // CSV escape minimal (quotes if comma)
+      const name = r.name.includes(",") ? `"${r.name.replaceAll('"', '""')}"` : r.name;
+      const rank = r.rank.includes(",") ? `"${r.rank.replaceAll('"', '""')}"` : r.rank;
+      const activity = r.activity.includes(",") ? `"${r.activity.replaceAll('"', '""')}"` : r.activity;
+      csvLines.push(`${name},${r.lvl},${rank},${r.honor},${activity}`);
+    }
+
+    csvEl.value = csvLines.join("\n");
+    setStatus(`Extracted ${rows.length} row(s). Review CSV then Copy.`);
+    copyBtn.disabled = false;
+  } catch (e) {
+    console.error(e);
+    setStatus("OCR failed. Try cropping tighter or use a clearer screenshot.");
   } finally {
-    extractButton.disabled = false;
-    copyButton.disabled = output.value.trim().length === 0;
+    extractBtn.disabled = false;
   }
 });
 
-copyButton.addEventListener("click", async () => {
-  try {
-    await navigator.clipboard.writeText(output.value);
-    setStatus("CSV copied to clipboard.");
-  } catch (error) {
-    setStatus("Copy failed. You can manually select the CSV.");
-  }
+copyBtn.addEventListener("click", async () => {
+  const text = csvEl.value.trim();
+  if (!text) return;
+  await navigator.clipboard.writeText(text);
+  setStatus("CSV copied to clipboard.");
 });
 
-output.addEventListener("input", () => {
-  copyButton.disabled = output.value.trim().length === 0;
+clearBtn.addEventListener("click", () => {
+  fileEl.value = "";
+  cleanupImage();
 });
+
+cleanupImage();

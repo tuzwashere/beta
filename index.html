@@ -1,66 +1,65 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>OneState Gang Screenshot → CSV</title>
-  <link
-    rel="stylesheet"
-    href="https://cdn.jsdelivr.net/npm/cropperjs@1.6.2/dist/cropper.min.css"
-  />
-  <link rel="stylesheet" href="style.css" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OSRP Gang Scanner → CSV</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/cropperjs@1.6.2/dist/cropper.min.css">
+  <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
-  <main class="page">
-    <header>
-      <h1>OneState Gang Member OCR → CSV</h1>
-      <p class="subtitle">Convert gang member screenshots into CSV with in-browser OCR.</p>
-    </header>
+  <div class="wrap">
+    <h1>OSRP Gang Scanner → CSV</h1>
+    <p class="sub">Upload your OneState “Members” screenshot, crop to the table, extract OCR, copy CSV into Discord.</p>
 
-    <section class="card">
-      <div class="controls">
-        <label class="file-label">
-          Upload screenshot
-          <input id="file-input" type="file" accept="image/*" />
-        </label>
-        <button id="extract-btn" class="primary" disabled>Extract CSV</button>
-        <button id="copy-btn" class="secondary" disabled>Copy</button>
+    <div class="card">
+      <div class="row">
+        <input id="file" type="file" accept="image/*" />
+        <button id="extract" disabled>Extract CSV</button>
+        <button id="copy" disabled>Copy CSV</button>
+        <button id="clear" disabled>Clear</button>
       </div>
 
-      <div class="status-row">
-        <progress id="ocr-progress" value="0" max="1"></progress>
-        <span id="status-text">Waiting for image…</span>
-      </div>
-
-      <div class="workspace">
-        <div class="preview">
-          <img id="preview-image" alt="Screenshot preview" />
+      <div class="grid">
+        <div>
+          <div class="label">1) Crop to ONLY the table (Name/Lvl/Rank/Honor/Activity)</div>
+          <div class="imgBox">
+            <img id="img" alt="preview" />
+          </div>
+          <div id="status" class="status">Waiting for image…</div>
+          <div class="hint">
+            Tip: Crop tight around the table. Exclude the left menu and bottom buttons.
+          </div>
         </div>
-        <div class="output">
-          <label for="csv-output">CSV output</label>
-          <textarea
-            id="csv-output"
-            rows="14"
-            spellcheck="false"
-          >name,lvl,rank,honor,activity</textarea>
+
+        <div>
+          <div class="label">2) CSV output (edit if needed)</div>
+          <textarea id="csv" placeholder="name,lvl,rank,honor,activity"></textarea>
+
+          <div class="label">Raw OCR (debug)</div>
+          <textarea id="raw" placeholder="Raw text from OCR will appear here…"></textarea>
         </div>
       </div>
-    </section>
 
-    <section class="card how-to">
-      <h2>How to use</h2>
-      <ol>
-        <li>Upload the screenshot file (avoid Discord compression).</li>
-        <li>Crop to only the table of members.</li>
-        <li>Click <strong>Extract CSV</strong>.</li>
-        <li>Click <strong>Copy</strong>.</li>
-        <li>Paste into Discord command: <code>/import_members data:&lt;paste&gt;</code>.</li>
-      </ol>
-    </section>
-  </main>
+      <hr />
 
-  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+      <div class="howto">
+        <h3>How to use</h3>
+        <ol>
+          <li>Upload a clean screenshot of the Members list (send as file when possible).</li>
+          <li>Crop to only the table (columns).</li>
+          <li>Click <b>Extract CSV</b>.</li>
+          <li>Click <b>Copy CSV</b>.</li>
+          <li>In Discord run: <b>/import_members</b> and paste the CSV.</li>
+        </ol>
+      </div>
+    </div>
+
+    <p class="foot">No login. No API keys. Runs in your browser.</p>
+  </div>
+
   <script src="https://cdn.jsdelivr.net/npm/cropperjs@1.6.2/dist/cropper.min.js"></script>
-  <script src="app.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  <script src="./app.js"></script>
 </body>
 </html>
