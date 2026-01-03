@@ -85,22 +85,21 @@ function cleanName(words) {
   const cleaned = (words || [])
     .map((t) => String(t || "").trim())
     .filter(Boolean)
-    // drop pure row numbers and common junk tokens
-    .filter((t) => !/^\d+$/.test(t))
+    // drop row index tokens like: "1", "1)", "1.", "1-", "1:"
+    .filter((t) => !/^\d+[)\].:,-]?$/.test(t))
+    // drop pure bullet / junk tokens
     .filter((t) => !/^[=•\-\u2022]+$/.test(t))
-    // drop leading bullet-ish prefixes like "=", "-", "•"
+    // strip leading bullet-ish prefixes from remaining tokens
     .map((t) => t.replace(/^[=•\-\u2022]+/g, "").trim())
     .filter(Boolean);
 
-  const s = cleaned
+  return cleaned
     .join(" ")
     .replace(/[“”]/g, '"')
     .replace(/\u00A0/g, " ")
     .replace(/[|]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-
-  return s;
 }
 
 function cleanRank(words) {
@@ -178,6 +177,22 @@ function bestRankMatch(rankText, rankList) {
 
   // Only snap if it’s reasonably close
   return best && bestScore <= 3 ? best : raw;
+}
+
+function detectRankFromRow(rowWords, rankList) {
+  if (!rankList?.length) return "";
+
+  const rowText = rowWords
+    .map((w) => String(w.text || ""))
+    .join(" ")
+    .toLowerCase();
+
+  for (const r of rankList) {
+    const rr = String(r || "").trim();
+    if (!rr) continue;
+    if (rowText.includes(rr.toLowerCase())) return rr;
+  }
+  return "";
 }
 
 function getRankList() {
@@ -364,6 +379,7 @@ function findHeaderCenters(words, canvasWidth) {
 function parseRowsFromWordBoxes(wordBoxes, canvasWidth, canvasHeight) {
   const rows = groupIntoRows(wordBoxes, canvasHeight);
   if (!rows.length) return [];
+  const { lvlCx, honorCx } = findHeaderCenters(wordBoxes, canvasWidth);
 
   // Fixed column bands (fractions of width) — stable across iPhone/desktop
   const COL = {
@@ -428,29 +444,39 @@ function parseRowsFromWordBoxes(wordBoxes, canvasWidth, canvasHeight) {
     const w = row.words.slice().sort((a, b) => a.cx - b.cx);
 
     const nameWords = w.filter((x) => inBand(x, ...COL.name)).map((x) => x.text);
-    const lvlWords = w.filter((x) => inBand(x, ...COL.lvl));
-    const rankWords = w
-      .filter((x) => inBand(x, ...COL.rank))
-      .filter((x) => /[A-Za-z]/.test(x.text))
-      .map((x) => x.text);
-
+    const lvlBand = canvasWidth * 0.045;
+    const lvlWords = w.filter((x) => Math.abs(x.cx - lvlCx) <= lvlBand);
     const honorWords = w.filter((x) => inBand(x, ...COL.honor));
     const actTokens = w.filter((x) => inBand(x, ...COL.act)).map((x) => x.text);
 
     const name = cleanName(nameWords);
     if (!name || name.length < 2) continue;
 
-    // LVL: try parse; if missing, keep row anyway (don’t drop it)
-    const lvlVal = parseLvl(lvlWords);
-    const lvl = lvlVal === null ? "" : lvlVal;
+    let lvl = parseLvl(lvlWords);
+    if (lvl === null) {
+      const fb = w
+        .map((x) => ({ x, n: digitsInt(x.text) }))
+        .filter((z) => z.n !== null && z.n >= 0 && z.n <= 99)
+        .sort((a, b) => Math.abs(a.x.cx - lvlCx) - Math.abs(b.x.cx - lvlCx));
+      lvl = fb.length ? fb[0].n : null;
+    }
+    if (lvl === null) continue;
 
     // HONOR: stitch if present; if OCR missed it (common for zeros) => HONOR = 0
     const honorVal = stitchNumber(honorWords);
     const honor = honorVal === null ? 0 : honorVal;
 
     // Rank
+    const rankWords = w
+      .filter((x) => x.cx > lvlCx + canvasWidth * 0.02 && x.cx < honorCx - canvasWidth * 0.04)
+      .filter((x) => /[A-Za-z]/.test(x.text))
+      .map((x) => x.text);
     let rank = cleanRank(rankWords);
     rank = bestRankMatch(rank, rankList);
+    if (!rank) {
+      const r2 = detectRankFromRow(w, rankList);
+      rank = r2 || "";
+    }
 
     // Activity
     const activity = normalizeOnline(actTokens);
