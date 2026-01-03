@@ -445,37 +445,68 @@ function parseRowsFromWordBoxes(wordBoxes, canvasWidth) {
 
     const lvl = lvlCandidates[0].n;
 
-    // HONOR (robust): take all numeric tokens in the row (excluding row index, LVL, and Activity area),
-    // stitch nearby chunks (ex: "26" + "200" => "26200"), then pick the largest resulting number.
+    // HONOR (row-robust): pick from numeric tokens in the row excluding:
+    // - row index on far left
+    // - the LVL token
+    // - time digits in the Activity column (ex: "2" + "h.")
+    // Then stitch adjacent chunks (ex: "26" + "200" => 26200, "133" + "040" => 133040)
     const numsAll = w
       .map(x => {
-        const s = String(x.text || "").trim();
-        const n = digitsOnly(s);
+        const raw = String(x.text || "").trim();
+        const n = digitsOnly(raw);
         if (n === null) return null;
-        const d = s.replace(/\D/g, ""); // keep original digits (preserve leading zeros if any)
+        const d = raw.replace(/\D/g, ""); // preserve chunk digits (keeps "040")
         if (!d) return null;
         return { x, n, d };
       })
       .filter(Boolean)
       .sort((a, b) => a.x.cx - b.x.cx);
 
-    // Exclude: far-left row index, LVL column, and far-right activity column.
+    // Identify which numeric token we used for LVL (closest to lvlCx within lvlBand)
+    const lvlBand2 = canvasWidth * 0.09;
+    let lvlToken = null;
+    {
+      let best = null;
+      let bestDist = Infinity;
+      for (const t of numsAll) {
+        if (t.n < 1 || t.n > 99) continue;
+        const dist = Math.abs(t.x.cx - lvlCx);
+        if (dist <= lvlBand2 && dist < bestDist) {
+          bestDist = dist;
+          best = t;
+        }
+      }
+      lvlToken = best;
+    }
+
+    // Helper: detect if a small number is actually part of Activity (digit followed by h/m/d token nearby)
+    function isTimeDigit(t) {
+      if (t.n > 99) return false;
+      // look for "h." / "m." / "d." token to the right within a small x range
+      for (const ww of w) {
+        const dt = String(ww.text || "").trim();
+        if (!dt) continue;
+        if (!/^[mhd]\.?$/i.test(dt)) continue;
+        if (ww.cx > t.x.cx && (ww.cx - t.x.cx) <= canvasWidth * 0.08) return true;
+      }
+      return false;
+    }
+
+    // Filter down to honor candidates
     const honorCandidates = numsAll.filter(t => {
-      const cx = t.x.cx;
+      // drop far-left row index like "1", "2", etc
+      if (t.x.cx < canvasWidth * 0.12 && t.n <= 99) return false;
 
-      // row index area (1..99) on far left
-      if (cx < canvasWidth * 0.12 && t.n <= 99) return false;
+      // drop the LVL token we picked
+      if (lvlToken && t === lvlToken) return false;
 
-      // LVL area
-      if (Math.abs(cx - lvlCx) <= canvasWidth * 0.09 && t.n <= 99) return false;
-
-      // Activity area (right-most); time digits like "7", "13" often live here
-      if (cx > (activityCx - canvasWidth * 0.11) && t.n <= 99) return false;
+      // drop activity time digits
+      if (isTimeDigit(t)) return false;
 
       return true;
     });
 
-    // Stitch adjacent chunks by proximity (works for "26" + "200", "133" + "040", etc)
+    // Stitch adjacent numeric chunks by proximity
     const groups = [];
     for (const t of honorCandidates) {
       const last = groups[groups.length - 1];
@@ -483,11 +514,8 @@ function parseRowsFromWordBoxes(wordBoxes, canvasWidth) {
         groups.push({ ds: [t.d], lastCx: t.x.cx });
         continue;
       }
-
       const dx = t.x.cx - last.lastCx;
-
-      // if chunks are close, treat as same number
-      if (dx <= canvasWidth * 0.07) {
+      if (dx <= canvasWidth * 0.075) {
         last.ds.push(t.d);
         last.lastCx = t.x.cx;
       } else {
@@ -495,18 +523,14 @@ function parseRowsFromWordBoxes(wordBoxes, canvasWidth) {
       }
     }
 
-    // Pick the best honor value
+    // Choose honor as the largest stitched value (or largest single token as fallback)
     let honor = 0;
     for (const g of groups) {
       const stitched = g.ds.join("");
       if (!stitched) continue;
       const val = parseInt(stitched, 10);
-      if (Number.isFinite(val) && val >= 0 && val <= 50000000) {
-        honor = Math.max(honor, val);
-      }
+      if (Number.isFinite(val)) honor = Math.max(honor, val);
     }
-
-    // If we still got 0 but there were candidates, fallback to largest single token
     if (honor === 0 && honorCandidates.length) {
       honor = honorCandidates.reduce((mx, t) => Math.max(mx, t.n), 0);
     }
