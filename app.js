@@ -238,7 +238,7 @@ function getRankList() {
 // Preprocess
 // ---------------------------
 function preprocessCanvas(srcCanvas) {
-  const scale = 2.2;
+  const scale = 2.2; // slightly lower helps avoid turning 6->8 sometimes
   const w = Math.max(1, Math.floor(srcCanvas.width * scale));
   const h = Math.max(1, Math.floor(srcCanvas.height * scale));
 
@@ -252,34 +252,35 @@ function preprocessCanvas(srcCanvas) {
   ctx.drawImage(srcCanvas, 0, 0, w, h);
 
   const img = ctx.getImageData(0, 0, w, h);
-  const d = img.data;
+  const data = img.data;
 
-  // Contrast + slight gamma to help thin colored text like green "Online"
-  const contrast = 1.35; // 1.0 = none
-  const gamma = 0.90; // <1 brightens mid-tones a bit
+  // Compute mean luminance for threshold
+  let sum = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    const y = (r * 0.299 + g * 0.587 + b * 0.114);
+    sum += y;
+  }
+  const mean = sum / (data.length / 4);
+  const thr = Math.min(230, Math.max(120, mean - 18));
 
-  for (let i = 0; i < d.length; i += 4) {
-    const r = d[i];
-    const g = d[i + 1];
-    const b = d[i + 2];
+  // Binarize, but FORCE green-ish pixels (Online) to black so OCR sees them
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
 
-    // luminance grayscale
-    let y = (r * 0.299 + g * 0.587 + b * 0.114);
+    const isGreenText = (g > r + 25) && (g > b + 25) && (g > 90);
 
-    // contrast around mid-point
-    y = (y - 128) * contrast + 128;
+    const y = (r * 0.299 + g * 0.587 + b * 0.114);
+    const v = (isGreenText || y < thr) ? 0 : 255;
 
-    // clamp
-    y = Math.max(0, Math.min(255, y));
-
-    // gamma
-    y = 255 * Math.pow(y / 255, gamma);
-
-    const v = Math.round(y);
-    d[i] = v;
-    d[i + 1] = v;
-    d[i + 2] = v;
-    d[i + 3] = 255;
+    data[i] = v;
+    data[i + 1] = v;
+    data[i + 2] = v;
+    data[i + 3] = 255;
   }
 
   ctx.putImageData(img, 0, 0);
@@ -305,200 +306,139 @@ function normalizeWord(w) {
   return { text, x0, x1, y0, y1, cx, cy, conf };
 }
 
-function groupIntoRows(words, canvasWidth) {
-  const ws = words.filter(w => w && w.text);
+function findRowBandsFromCanvas(binCanvas) {
+  const ctx = binCanvas.getContext("2d", { willReadFrequently: true });
+  const w = binCanvas.width;
+  const h = binCanvas.height;
+  const data = ctx.getImageData(0, 0, w, h).data;
 
-  // Keep good-confidence words everywhere,
-  // and also keep lower-confidence words in the Activity (far-right) area.
-  const kept = ws.filter(w => {
-    const conf = (typeof w.conf === "number") ? w.conf : 100;
+  // blackFrac[y] = fraction of black pixels on that scanline
+  const blackFrac = new Float32Array(h);
 
-    if (conf >= 20) return true;
-
-    // Activity column text is small/green -> often low confidence.
-    if (w.cx >= canvasWidth * 0.82 && conf >= 8) return true;
-
-    // Honor digits can also be low confidence sometimes
-    if (w.cx >= canvasWidth * 0.60 && w.cx <= canvasWidth * 0.92 && conf >= 10) return true;
-
-    return false;
-  });
-
-  kept.sort((a, b) => a.cy - b.cy);
-
-  const heights = kept.map(w => Math.max(1, w.y1 - w.y0)).sort((a, b) => a - b);
-  const medianH = heights.length ? heights[Math.floor(heights.length / 2)] : 18;
-  const gap = Math.max(10, Math.min(40, medianH * 0.9));
-
-  const rows = [];
-  for (const w of kept) {
-    const last = rows[rows.length - 1];
-    if (!last) {
-      rows.push({ y: w.cy, words: [w] });
-      continue;
+  for (let y = 0; y < h; y++) {
+    let black = 0;
+    const rowStart = y * w * 4;
+    for (let x = 0; x < w; x++) {
+      const i = rowStart + x * 4;
+      // binarized: black is 0
+      if (data[i] < 30) black++;
     }
-    if (Math.abs(w.cy - last.y) <= gap) {
-      last.words.push(w);
-      last.y = (last.y * (last.words.length - 1) + w.cy) / last.words.length;
-    } else {
-      rows.push({ y: w.cy, words: [w] });
-    }
+    blackFrac[y] = black / w;
   }
 
-  // Merge tiny rows into nearest
-  const merged = [];
-  for (const r of rows) {
-    if (!merged.length) { merged.push(r); continue; }
-    const prev = merged[merged.length - 1];
-    if (r.words.length <= 2 && Math.abs(r.y - prev.y) <= gap * 1.2) {
-      prev.words.push(...r.words);
-      prev.y = (prev.y + r.y) / 2;
-    } else {
-      merged.push(r);
+  // Smooth it
+  const smooth = new Float32Array(h);
+  const win = 5;
+  for (let y = 0; y < h; y++) {
+    let s = 0;
+    let c = 0;
+    for (let k = -win; k <= win; k++) {
+      const yy = y + k;
+      if (yy < 0 || yy >= h) continue;
+      s += blackFrac[yy];
+      c++;
     }
+    smooth[y] = s / c;
   }
 
-  // Remove obvious header row(s)
-  const out = merged.filter(r => {
-    const line = r.words.map(w => w.text).join(" ").toLowerCase();
-    if (/(members|lvl|member\s*ranks|honor|points|activity)/i.test(line) && r.words.length <= 14) {
-      return false;
-    }
-    return true;
-  });
+  // Find "line" bands: contiguous y where smooth[y] is high
+  const lineThreshold = 0.35; // row dividers are strong black spans
+  const lineYs = [];
+  let inBand = false;
+  let bandStart = 0;
 
-  for (const r of out) r.words.sort((a, b) => a.cx - b.cx);
-  return out;
+  for (let y = 0; y < h; y++) {
+    const isLine = smooth[y] >= lineThreshold;
+    if (isLine && !inBand) {
+      inBand = true;
+      bandStart = y;
+    } else if (!isLine && inBand) {
+      inBand = false;
+      const bandEnd = y - 1;
+      const center = Math.floor((bandStart + bandEnd) / 2);
+      lineYs.push(center);
+    }
+  }
+  if (inBand) {
+    const center = Math.floor((bandStart + (h - 1)) / 2);
+    lineYs.push(center);
+  }
+
+  // Build row bands between lines.
+  // Add top & bottom guards.
+  const cuts = [0, ...lineYs, h];
+  cuts.sort((a, b) => a - b);
+
+  const bands = [];
+  for (let i = 0; i < cuts.length - 1; i++) {
+    const y0 = cuts[i];
+    const y1 = cuts[i + 1];
+    const height = y1 - y0;
+
+    // Filter out tiny bands (noise / header separators)
+    if (height < Math.max(18, h * 0.04)) continue;
+
+    bands.push({ y0, y1 });
+  }
+
+  return bands;
 }
 
-// Learn column anchors + LEFT bound for Activity (fixes Online being skipped)
-function findHeaderCenters(words, canvasWidth) {
-  const topWords = [...words].sort((a, b) => a.cy - b.cy).slice(0, 180);
-
-  const pick = (regexList) => {
-    for (const re of regexList) {
-      const hit = topWords.find(w => re.test(w.text));
-      if (hit) return hit.cx;
-    }
-    return null;
-  };
-
-  let lvlCx = pick([/^lvl$/i, /^lv1$/i, /^lv$/i]);
-  let honorCx = pick([/^honor$/i, /^points$/i, /^honorpoints$/i, /^honor\s*points$/i]);
-  let activityCx = pick([/^activity$/i, /^actlity$/i, /^actlvity$/i, /^act$/i]);
-
-  const nums = words
-    .map(w => ({ w, n: digitsOnly(w.text) }))
-    .filter(x => x.n !== null);
-
-  const lvlCandidates = nums
-    .filter(x => x.n >= 1 && x.n <= 99)
-    .filter(x => x.w.cx > canvasWidth * 0.25 && x.w.cx < canvasWidth * 0.60);
-
-  if (lvlCandidates.length >= 4) {
-    const xs = lvlCandidates.map(x => x.w.cx).sort((a, b) => a - b);
-    lvlCx = xs[Math.floor(xs.length / 2)];
-  }
-
-  const honorCandidates = nums
-    .filter(x => (x.n >= 100) || x.n === 0)
-    .filter(x => x.w.cx > canvasWidth * 0.60 && x.w.cx < canvasWidth * 0.92);
-
-  if (honorCandidates.length >= 4) {
-    const xs = honorCandidates.map(x => x.w.cx).sort((a, b) => a - b);
-    honorCx = xs[Math.floor(xs.length / 2)];
-  }
-
-  // Activity candidates
-  const activityCandidates = words
-    .filter(w => w.cx > canvasWidth * 0.62) // wider net than before
-    .filter(w => {
-      const t = String(w.text || "").trim();
-
-      if (/\bonline\b/i.test(t)) return true;
-      if (/^(on|0n|onl|0nl)$/i.test(t)) return true;
-      if (/\b\d{1,2}\s*[mhd]\.?\b/i.test(t)) return true;
-
-      const alpha = t.replace(/[^A-Za-z]/g, "");
-      if (alpha.length >= 2 && alpha.length <= 10) return true;
-
-      return false;
-    });
-
-  let activityLeft = canvasWidth * 0.74;
-  if (activityCandidates.length >= 2) {
-    const lefts = activityCandidates.map(w => w.x0).sort((a, b) => a - b);
-    const p15 = lefts[Math.floor(lefts.length * 0.15)];
-    activityLeft = Math.max(canvasWidth * 0.60, p15 - canvasWidth * 0.02);
-  }
-
-  if (activityCandidates.length >= 3) {
-    const xs = activityCandidates.map(w => w.cx).sort((a, b) => a - b);
-    activityCx = xs[Math.floor(xs.length / 2)];
-  }
-
-  return {
-    lvlCx: lvlCx ?? canvasWidth * 0.47,
-    honorCx: honorCx ?? canvasWidth * 0.80,
-    activityCx: activityCx ?? canvasWidth * 0.93,
-    activityLeft,
-  };
-}
-
-function parseRowsFromWordBoxes(wordBoxes, numericBoxes, canvasWidth) {
-  const rows = groupIntoRows(wordBoxes, canvasWidth);
-  const kept = wordBoxes.filter(w => w && w.text);
-  const heights = kept.map(w => Math.max(1, w.y1 - w.y0)).sort((a, b) => a - b);
-  const medianH = heights.length ? heights[Math.floor(heights.length / 2)] : 18;
-  const gap = Math.max(10, Math.min(40, medianH * 0.9));
-  if (!rows.length) return [];
-
-  const { lvlCx, honorCx, activityCx, activityLeft } = findHeaderCenters(wordBoxes, canvasWidth);
+function parseRowsFromWordBoxes(wordBoxes, canvasWidth, rowBands) {
   const rankList = getRankList();
+
+  // Fixed columns by percentage (stable even if header OCR shifts)
+  const X = {
+    nameRight: canvasWidth * 0.40,
+    lvlLeft: canvasWidth * 0.40,
+    lvlRight: canvasWidth * 0.52,
+    rankLeft: canvasWidth * 0.52,
+    rankRight: canvasWidth * 0.68,
+    honorLeft: canvasWidth * 0.62,
+    honorRight: canvasWidth * 0.88,
+    activityLeft: canvasWidth * 0.84,
+  };
 
   const out = [];
 
-  // helper: honor tokens from numeric OCR matched by row Y
-  function honorTokensForRow(rowY, honorLeft, honorRight) {
-    if (!numericBoxes?.length) return [];
-    return numericBoxes
-      .filter(w => w && w.conf >= 25)
-      .filter(w => Math.abs(w.cy - rowY) <= gap * 1.05)
-      .filter(w => w.cx >= honorLeft && w.cx <= honorRight)
-      .map(w => ({ x: w, n: digitsOnly(w.text) }))
-      .filter(z => z.n !== null)
-      .sort((a, b) => a.x.cx - b.x.cx);
-  }
+  for (const band of rowBands) {
+    const w = wordBoxes
+      .filter(x => x.cy >= band.y0 && x.cy <= band.y1)
+      .filter(x => x && x.text && x.conf >= 25)
+      .sort((a, b) => a.cx - b.cx);
 
-  for (const row of rows) {
-    const w = row.words;
+    if (!w.length) continue;
 
-    // LVL: choose best numeric token near lvlCx
-    const lvlBand = canvasWidth * 0.08;
+    // Drop header-ish band(s)
+    const line = w.map(x => x.text).join(" ").toLowerCase();
+    if (/(members|lvl|member\s*ranks|honor|points|activity)/i.test(line)) continue;
+
+    // Name
+    const nameWords = w.filter(x => x.cx < X.nameRight).map(x => x.text);
+    const name = cleanName(nameWords);
+    if (!name || name.length < 2) continue;
+
+    // LVL (digits only inside lvl band)
     const lvlCandidates = w
-      .map(x => ({ x, n: digitsOnly(x.text) }))
-      .filter(z => z.n !== null && z.n >= 1 && z.n <= 99)
-      .filter(z => Math.abs(z.x.cx - lvlCx) <= lvlBand);
+      .filter(x => x.cx >= X.lvlLeft && x.cx <= X.lvlRight)
+      .map(x => digitsOnly(x.text))
+      .filter(n => n !== null && n >= 1 && n <= 99);
 
     if (!lvlCandidates.length) continue;
+    const lvl = lvlCandidates[0];
 
-    lvlCandidates.sort((a, b) => {
-      const da = Math.abs(a.x.cx - lvlCx) / lvlBand;
-      const db = Math.abs(b.x.cx - lvlCx) / lvlBand;
-      const ca = 1 - (Math.max(0, Math.min(100, a.x.conf)) / 100);
-      const cb = 1 - (Math.max(0, Math.min(100, b.x.conf)) / 100);
-      return (da * 0.65 + ca * 0.35) - (db * 0.65 + cb * 0.35);
-    });
+    // Rank (letters inside rank band)
+    const rankWords = w
+      .filter(x => x.cx >= X.rankLeft && x.cx <= X.rankRight)
+      .filter(x => /[A-Za-z]/.test(x.text))
+      .map(x => x.text);
 
-    const lvl = lvlCandidates[0].n;
+    let rank = cleanRank(rankWords);
+    rank = bestRankMatch(rank, rankList);
 
-    // HONOR: use a stable % band of the image width (more reliable than honorCx/activityCx)
-    // This band targets the "HONOR POINTS" column regardless of header OCR drift.
-    const honorBandLeft = canvasWidth * 0.62;
-    const honorBandRight = canvasWidth * 0.88;
-
+    // Honor (stitch split numbers, take max)
     const honorTokens = w
-      .filter(x => x.cx >= honorBandLeft && x.cx <= honorBandRight)
+      .filter(x => x.cx >= X.honorLeft && x.cx <= X.honorRight)
       .map(x => {
         const d = String(x.text || "").replace(/[^\d]/g, "");
         return d ? { cx: x.cx, d } : null;
@@ -506,9 +446,6 @@ function parseRowsFromWordBoxes(wordBoxes, numericBoxes, canvasWidth) {
       .filter(Boolean)
       .sort((a, b) => a.cx - b.cx);
 
-    // Build candidates:
-    // - any 3+ digit token is a candidate
-    // - stitch 1–2 digits + next 3+ digits when close (handles "26 200" => 26200, "11 970" => 11970)
     const honorCandidates = [];
     for (let i = 0; i < honorTokens.length; i++) {
       const cur = honorTokens[i].d;
@@ -518,35 +455,16 @@ function parseRowsFromWordBoxes(wordBoxes, numericBoxes, canvasWidth) {
       if (cur.length <= 2 && i + 1 < honorTokens.length) {
         const nxt = honorTokens[i + 1].d;
         const dx = honorTokens[i + 1].cx - honorTokens[i].cx;
-
         if (nxt.length >= 3 && dx <= canvasWidth * 0.08) {
           honorCandidates.push(parseInt(cur + nxt, 10));
         }
       }
     }
+    const honor = honorCandidates.length ? Math.max(...honorCandidates) : 0;
 
-    let honor = honorCandidates.length ? Math.max(...honorCandidates) : 0;
-
-    // Name: everything left of lvl
-    const nameWords = w
-      .filter(x => x.cx < (lvlCx - canvasWidth * 0.06))
-      .map(x => x.text);
-
-    const name = cleanName(nameWords);
-    if (!name || name.length < 2) continue;
-
-    // Rank: between lvl and honor
-    const rankWords = w
-      .filter(x => x.cx > (lvlCx + canvasWidth * 0.03) && x.cx < (honorCx - canvasWidth * 0.06))
-      .filter(x => /[A-Za-z]/.test(x.text))
-      .map(x => x.text);
-
-    let rank = cleanRank(rankWords);
-    rank = bestRankMatch(rank, rankList);
-
-    // Activity: use activityLeft (wide enough for "Online")
+    // Activity (right side)
     const activityTokens = w
-      .filter(x => x.x1 >= activityLeft) // use right-edge overlap instead of center
+      .filter(x => x.cx >= X.activityLeft)
       .map(x => x.text);
 
     const activity = normalizeActivityFromTokens(activityTokens);
@@ -554,17 +472,23 @@ function parseRowsFromWordBoxes(wordBoxes, numericBoxes, canvasWidth) {
     out.push({ name, lvl, rank: rank || "", honor, activity });
   }
 
-  // De-dup
-  const seen = new Set();
-  const deduped = [];
+  // De-dup by name (best for your use case)
+  const map = new Map();
   for (const r of out) {
-    const k = `${r.name}|${r.lvl}|${r.honor}|${r.activity}`;
-    if (seen.has(k)) continue;
-    seen.add(k);
-    deduped.push(r);
+    const k = (r.name || "").toLowerCase().trim();
+    if (!k) continue;
+
+    if (!map.has(k)) map.set(k, r);
+    else {
+      const prev = map.get(k);
+      prev.honor = Math.max(prev.honor || 0, r.honor || 0);
+      if (r.activity && r.activity !== "n/a") prev.activity = r.activity;
+      if (r.rank && r.rank.trim()) prev.rank = r.rank;
+      prev.lvl = r.lvl ?? prev.lvl;
+    }
   }
 
-  return deduped;
+  return Array.from(map.values());
 }
 
 // ---------------------------
@@ -577,22 +501,6 @@ async function doOCR(canvas) {
       if (m.status) {
         const pct = m.progress ? ` (${Math.round(m.progress * 100)}%)` : "";
         setStatus(`${m.status}${pct}`);
-      }
-    },
-  });
-  return data;
-}
-
-// Numeric-only OCR pass to stabilize honor digits
-async function doOCRNumeric(canvas) {
-  setStatus("OCR (numbers)…");
-  const { data } = await Tesseract.recognize(canvas, "eng", {
-    tessedit_char_whitelist: "0123456789",
-    classify_bln_numeric_mode: "1",
-    logger: (m) => {
-      if (m.status) {
-        const pct = m.progress ? ` (${Math.round(m.progress * 100)}%)` : "";
-        setStatus(`numbers: ${m.status}${pct}`);
       }
     },
   });
@@ -726,20 +634,18 @@ extractBtn.addEventListener("click", async () => {
 
     // Grayscale + contrast normalization (preserves Online + digits)
     const preText = preprocessCanvas(cropped);
-    const preNum = preprocessCanvas(cropped);
 
     const data = await doOCR(preText);
-    const dataNum = await doOCRNumeric(preNum);
 
     const wordBoxes = (data.words || []).map(normalizeWord).filter(Boolean);
-    const numericBoxes = (dataNum.words || []).map(normalizeWord).filter(Boolean);
 
     if (!wordBoxes.length) {
       setStatus("No OCR words found. Try a clearer screenshot.");
       return;
     }
 
-    const rows = parseRowsFromWordBoxes(wordBoxes, numericBoxes, preText.width);
+    const rowBands = findRowBandsFromCanvas(preText);
+    const rows = parseRowsFromWordBoxes(wordBoxes, preText.width, rowBands);
     if (!rows.length) {
       setStatus("No rows detected. Crop tighter around ONLY the rows and try again.");
       return;
