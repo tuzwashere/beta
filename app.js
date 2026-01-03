@@ -343,69 +343,103 @@ function parseRowsFromWordBoxes(wordBoxes, canvasWidth, canvasHeight) {
   const rows = groupIntoRows(wordBoxes, canvasHeight);
   if (!rows.length) return [];
 
-  const { lvlCx, honorCx, activityCx } = findHeaderCenters(wordBoxes, canvasWidth);
+  // Fixed column bands (fractions of width) — stable across iPhone/desktop
+  const COL = {
+    name: [0.0, 0.36],
+    lvl: [0.36, 0.46],
+    rank: [0.46, 0.72],
+    honor: [0.72, 0.88],
+    act: [0.88, 1.0],
+  };
 
   const rankList = getRankList();
-
   const out = [];
 
-  for (const row of rows) {
-    const w = row.words;
+  const inBand = (w, a, b) => w.cx >= canvasWidth * a && w.cx < canvasWidth * b;
 
-    // LVL: nearest 1-99 digit token to lvlCx
-    const lvlCand = w
-      .map((x) => ({ x, n: digitsOnly(x.text) }))
-      .filter((z) => z.n !== null && z.n >= 1 && z.n <= 99)
-      .sort((a, b) => Math.abs(a.x.cx - lvlCx) - Math.abs(b.x.cx - lvlCx));
+  // Stitch numbers inside a band left->right: "30" + "050" => 30050
+  function stitchNumber(wordsInBand) {
+    const nums = wordsInBand
+      .map((w) => ({ w, n: digitsOnly(w.text) }))
+      .filter((x) => x.n !== null)
+      .sort((a, b) => a.w.cx - b.w.cx);
 
-    const lvl = lvlCand.length ? lvlCand[0].n : null;
-    if (lvl === null) continue;
+    if (!nums.length) return null;
 
-    // HONOR: stitch digit chunks near honorCx (fixes "30 050" => 30050, blocks "x30")
-    const honorBand = canvasWidth * 0.09;
-    const honorWords = w
-      .filter((x) => Math.abs(x.cx - honorCx) <= honorBand)
-      .map((x) => ({ x, n: digitsOnly(x.text) }))
-      .filter((z) => z.n !== null)
-      .sort((a, b) => a.x.cx - b.x.cx);
+    // Join as strings to preserve split chunks
+    const stitched = nums.map((x) => String(x.n)).join("");
+    if (!stitched) return null;
+    return parseInt(stitched, 10);
+  }
 
-    let honor = 0;
-    if (honorWords.length) {
-      const stitched = honorWords.map((z) => String(z.n)).join("");
-      honor = stitched ? parseInt(stitched, 10) : 0;
-    } else {
-      // fallback: nearest numeric token to honorCx
-      const fallback = w
-        .map((x) => ({ x, n: digitsOnly(x.text) }))
-        .filter((z) => z.n !== null)
-        .sort((a, b) => Math.abs(a.x.cx - honorCx) - Math.abs(b.x.cx - honorCx));
-      honor = fallback.length ? fallback[0].n : 0;
+  function parseLvl(wordsInBand) {
+    // LVL can be "18" or split "1" "8" or sometimes just "8"
+    const nums = wordsInBand
+      .map((w) => ({ w, n: digitsOnly(w.text) }))
+      .filter((x) => x.n !== null && x.n >= 0 && x.n <= 99)
+      .sort((a, b) => a.w.cx - b.w.cx);
+
+    if (!nums.length) return null;
+
+    // If multiple small chunks, stitch (e.g., "1" + "8" => 18)
+    if (nums.length >= 2) {
+      const stitched = nums.map((x) => String(x.n)).join("");
+      const v = stitched ? parseInt(stitched, 10) : null;
+      if (v !== null && v >= 0 && v <= 99) return v;
     }
 
-    // Name: everything clearly left of lvl column
-    const nameWords = w.filter((x) => x.cx < lvlCx - canvasWidth * 0.06).map((x) => x.text);
+    // Otherwise take the most plausible single token
+    return nums[0].n;
+  }
+
+  function normalizeOnline(tokens) {
+    const s = tokens.join(" ").trim();
+    if (!s) return "n/a";
+
+    // iPhone gives junk like "Onlir", "Onl", "0n"
+    if (/\bonl/i.test(s) || /(^|\s)(on|0n)(\s|$)/i.test(s)) return "Online";
+
+    const m = s.match(/\b(\d{1,2})\s*([mhd])\.?\b/i);
+    if (m) return `${parseInt(m[1], 10)}${m[2].toLowerCase()}`;
+
+    return "n/a";
+  }
+
+  for (const row of rows) {
+    const w = row.words.slice().sort((a, b) => a.cx - b.cx);
+
+    const nameWords = w.filter((x) => inBand(x, ...COL.name)).map((x) => x.text);
+    const lvlWords = w.filter((x) => inBand(x, ...COL.lvl));
+    const rankWords = w
+      .filter((x) => inBand(x, ...COL.rank))
+      .filter((x) => /[A-Za-z]/.test(x.text))
+      .map((x) => x.text);
+
+    const honorWords = w.filter((x) => inBand(x, ...COL.honor));
+    const actTokens = w.filter((x) => inBand(x, ...COL.act)).map((x) => x.text);
 
     const name = cleanName(nameWords);
     if (!name || name.length < 2) continue;
 
-    // Rank: between lvl and honor, only letter-ish tokens
-    const rankWords = w
-      .filter((x) => x.cx > lvlCx + canvasWidth * 0.03 && x.cx < honorCx - canvasWidth * 0.06)
-      .filter((x) => /[A-Za-z]/.test(x.text))
-      .map((x) => x.text);
+    // LVL: try parse; if missing, keep row anyway (don’t drop it)
+    const lvlVal = parseLvl(lvlWords);
+    const lvl = lvlVal === null ? "" : lvlVal;
 
+    // HONOR: stitch if present; if OCR missed it (common for zeros) => HONOR = 0
+    const honorVal = stitchNumber(honorWords);
+    const honor = honorVal === null ? 0 : honorVal;
+
+    // Rank
     let rank = cleanRank(rankWords);
     rank = bestRankMatch(rank, rankList);
 
-    // Activity: far right tokens, parse Online / 5m / 2h / 1d
-    const activityTokens = w.filter((x) => x.cx > activityCx - canvasWidth * 0.12).map((x) => x.text);
-
-    const activity = normalizeActivityFromTokens(activityTokens);
+    // Activity
+    const activity = normalizeOnline(actTokens);
 
     out.push({ name, lvl, rank: rank || "", honor, activity });
   }
 
-  // De-dup (sometimes OCR repeats a row)
+  // De-dup
   const seen = new Set();
   const deduped = [];
   for (const r of out) {
