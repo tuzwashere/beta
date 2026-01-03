@@ -75,14 +75,20 @@ function normalizeActivityFromTokens(tokens) {
 }
 
 function cleanName(words) {
-  const s = words.join(" ")
+  let s = words.join(" ")
     .replace(/[“”]/g, '"')
     .replace(/\u00A0/g, " ")
     .replace(/[|]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 
-  return s.replace(/^[^\w]+/g, "").replace(/^\d+\s+/, "").trim();
+  // Remove leading row index
+  s = s.replace(/^\d+\s+/, "").trim();
+
+  // Remove common OCR junk prefix (Ol / 0l / O1 / 01 etc)
+  s = s.replace(/^(?:ol|0l|o1|01|l|i)\s+/i, "").trim();
+
+  return s;
 }
 
 // PATCH: drop 1–2 letter junk like Ey/Wy/NF + fix Donn/Boss OCR typos
@@ -407,27 +413,61 @@ function parseRowsFromWordBoxes(wordBoxes, canvasWidth) {
 
     const lvl = lvlCandidates[0].n;
 
-    // HONOR: stitch digit chunks near honorCx, but ONLY chunks that look like honor formatting.
-    // Rules:
-    // - prefer 3-digit chunks (e.g., "26" + "200" or "133" + "040")
-    // - ignore 1–2 digit tokens (those are usually LVL/row index noise)
-    // - ignore tokens too far from honorCx
-    const honorBand = canvasWidth * 0.10;
+    // HONOR: use a stable region between rank area and activity area.
+    // This avoids honorCx drift causing honor to disappear.
+    const honorLeft = honorCx - canvasWidth * 0.18;
+    const honorRight = activityCx - canvasWidth * 0.14;
 
-    const honorParts = w
-      .map(x => ({ x, n: digitsOnly(x.text), t: String(x.text || "").trim() }))
+    const honorRaw = w
+      .filter(x => x.cx >= honorLeft && x.cx <= honorRight)
+      .map(x => ({ x, n: digitsOnly(x.text), s: String(x.text || "").trim() }))
       .filter(z => z.n !== null)
-      .filter(z => Math.abs(z.x.cx - honorCx) <= honorBand)
-      // keep chunks that are at least 3 digits OR exactly 0 (real honor can be 0)
-      .filter(z => z.n === 0 || String(z.n).length >= 3)
       .sort((a, b) => a.x.cx - b.x.cx);
 
+    // Keep only likely honor chunks:
+    // - allow 3+ digit chunks always (200, 970, 26200, 11970, etc)
+    // - allow 1–2 digit chunk ONLY if it is immediately followed by a 3-digit chunk (26 + 200)
+    const parts = [];
+    for (let i = 0; i < honorRaw.length; i++) {
+      const cur = honorRaw[i];
+      const curLen = String(cur.n).length;
+
+      if (cur.n === 0) {
+        // keep 0 only if it's the only thing we find
+        parts.push(cur);
+        continue;
+      }
+
+      if (curLen >= 3) {
+        parts.push(cur);
+        continue;
+      }
+
+      // 1–2 digit prefix rule (e.g., "26" before "200")
+      const next = honorRaw[i + 1];
+      if (next && String(next.n).length === 3) {
+        // also require the next chunk to be close on x axis
+        if ((next.x.cx - cur.x.cx) <= canvasWidth * 0.08) {
+          parts.push(cur);
+          continue;
+        }
+      }
+    }
+
+    // Build honor
     let honor = 0;
-    if (honorParts.length >= 2) {
-      const stitched = honorParts.map(z => String(z.n).padStart(3, "0")).join("");
-      honor = parseInt(stitched, 10);
-    } else if (honorParts.length === 1) {
-      honor = honorParts[0].n;
+    if (parts.length) {
+      // If we captured a split like 26 + 200, stitch as "26" + "200"
+      // If it's already a full number like 28200, it's just one part.
+      const stitched = parts.map(p => String(p.n)).join("");
+      honor = stitched ? parseInt(stitched, 10) : 0;
+
+      // If honor is clearly nonsense small (like 57 + 1970 => 571970), don’t trust it.
+      // Fallback to the single largest numeric token in the region.
+      if (honor > 999999 || honor < 0) {
+        const best = honorRaw.reduce((mx, z) => Math.max(mx, z.n), 0);
+        honor = best || 0;
+      }
     } else {
       honor = 0;
     }
