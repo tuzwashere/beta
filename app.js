@@ -1,7 +1,7 @@
 // OSRP Gang Scanner -> CSV (robust word-box parsing for mobile/desktop)
 // Drop-in app.js
 
-const BUILD = "v12"; // bump when you deploy
+const BUILD = "v13"; // bump when you deploy
 document.title = `OSRP Gang Scanner → CSV (${BUILD})`;
 
 const fileEl = document.getElementById("file");
@@ -238,9 +238,7 @@ function getRankList() {
 // Preprocess
 // ---------------------------
 function preprocessCanvas(srcCanvas) {
-  // Scale up for OCR, but DO NOT hard-threshold to black/white
-  // (that kills green "Online" and makes 6→8 more likely).
-  const scale = 3.0;
+  const scale = 2.2;
   const w = Math.max(1, Math.floor(srcCanvas.width * scale));
   const h = Math.max(1, Math.floor(srcCanvas.height * scale));
 
@@ -254,38 +252,34 @@ function preprocessCanvas(srcCanvas) {
   ctx.drawImage(srcCanvas, 0, 0, w, h);
 
   const img = ctx.getImageData(0, 0, w, h);
-  const data = img.data;
+  const d = img.data;
 
-  // Compute mean/stdev luminance for contrast normalization
-  let sum = 0;
-  let sum2 = 0;
-  const n = data.length / 4;
+  // Contrast + slight gamma to help thin colored text like green "Online"
+  const contrast = 1.35; // 1.0 = none
+  const gamma = 0.90; // <1 brightens mid-tones a bit
 
-  for (let i = 0; i < data.length; i += 4) {
-    const y = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
-    sum += y;
-    sum2 += y * y;
-  }
+  for (let i = 0; i < d.length; i += 4) {
+    const r = d[i];
+    const g = d[i + 1];
+    const b = d[i + 2];
 
-  const mean = sum / n;
-  const var_ = Math.max(1, (sum2 / n) - mean * mean);
-  const std = Math.sqrt(var_);
+    // luminance grayscale
+    let y = (r * 0.299 + g * 0.587 + b * 0.114);
 
-  // Normalize contrast (keeps edges + preserves “Online” better than B/W)
-  // Target std ~ 70
-  const gain = 70 / std;
+    // contrast around mid-point
+    y = (y - 128) * contrast + 128;
 
-  for (let i = 0; i < data.length; i += 4) {
-    const y = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+    // clamp
+    y = Math.max(0, Math.min(255, y));
 
-    let v = (y - mean) * gain + 128;     // normalize
-    v = Math.max(0, Math.min(255, v));   // clamp
+    // gamma
+    y = 255 * Math.pow(y / 255, gamma);
 
-    // slight gamma to help thin text
-    v = Math.pow(v / 255, 0.92) * 255;
-
-    data[i] = data[i + 1] = data[i + 2] = v;
-    data[i + 3] = 255;
+    const v = Math.round(y);
+    d[i] = v;
+    d[i + 1] = v;
+    d[i + 2] = v;
+    d[i + 3] = 255;
   }
 
   ctx.putImageData(img, 0, 0);
