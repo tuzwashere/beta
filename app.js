@@ -1,7 +1,7 @@
 // OSRP Gang Scanner -> CSV (robust word-box parsing for mobile/desktop)
 // Drop-in app.js
 
-const BUILD = "v14"; // bump when you deploy
+const BUILD = "v15"; // bump when you deploy
 document.title = `OSRP Gang Scanner → CSV (${BUILD})`;
 
 const fileEl = document.getElementById("file");
@@ -95,20 +95,23 @@ function cleanName(words) {
     .replace(/[“”]/g, '"')
     .replace(/\u00A0/g, " ")
     .replace(/[|]/g, " ")
+    .replace(/[@]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 
-  // Strip leading bullets/junk
+  // Strip leading bullets/junk symbols
   s = s.replace(/^[^\w]+/g, "").trim();
 
   // Strip row index patterns: "3) Name", "3. Name", "3 - Name", "3: Name"
   s = s.replace(/^\d+\s*[\)\.\:\-—–]\s*/g, "");
 
-  // Strip single-letter / 1-2 char junk tokens: "B- Name", "x Name"
-  s = s.replace(/^[A-Za-z]{1,2}\s*[\)\.\:\-—–]\s*/g, "");
-
   // Strip plain "3 Name"
   s = s.replace(/^\d+\s+/g, "");
+
+  // Drop leading 1–2 letter junk tokens (OCR noise like "bo", "a", "z", "bh")
+  let toks = s.split(/\s+/).filter(Boolean);
+  while (toks.length && /^[A-Za-z]{1,2}$/.test(toks[0])) toks.shift();
+  s = toks.join(" ");
 
   return s.trim();
 }
@@ -409,9 +412,8 @@ function parseRowsFromWordBoxes(wordBoxes, canvasWidth, rowBands) {
 
     if (!w.length) continue;
 
-    // Drop header-ish band(s)
     const line = w.map(x => x.text).join(" ").toLowerCase();
-    if (/(members|lvl|member\s*ranks|honor|points|activity)/i.test(line)) continue;
+    const looksLikeHeader = /(members|lvl|member\s*ranks|honor|points|activity)/i.test(line);
 
     // Name
     const nameWords = w.filter(x => x.cx < X.nameRight).map(x => x.text);
@@ -424,6 +426,7 @@ function parseRowsFromWordBoxes(wordBoxes, canvasWidth, rowBands) {
       .map(x => digitsOnly(x.text))
       .filter(n => n !== null && n >= 1 && n <= 99);
 
+    if (looksLikeHeader && !lvlCandidates.length) continue;
     if (!lvlCandidates.length) continue;
     const lvl = lvlCandidates[0];
 
@@ -446,21 +449,22 @@ function parseRowsFromWordBoxes(wordBoxes, canvasWidth, rowBands) {
       .filter(Boolean)
       .sort((a, b) => a.cx - b.cx);
 
-    const honorCandidates = [];
-    for (let i = 0; i < honorTokens.length; i++) {
+    const singleVals = honorTokens
+      .map(t => (t.d.length >= 3 ? parseInt(t.d, 10) : null))
+      .filter(v => v !== null);
+
+    const stitchedVals = [];
+    for (let i = 0; i < honorTokens.length - 1; i++) {
       const cur = honorTokens[i].d;
+      const nxt = honorTokens[i + 1].d;
+      const dx = honorTokens[i + 1].cx - honorTokens[i].cx;
 
-      if (cur.length >= 3) honorCandidates.push(parseInt(cur, 10));
-
-      if (cur.length <= 2 && i + 1 < honorTokens.length) {
-        const nxt = honorTokens[i + 1].d;
-        const dx = honorTokens[i + 1].cx - honorTokens[i].cx;
-        if (nxt.length >= 3 && dx <= canvasWidth * 0.08) {
-          honorCandidates.push(parseInt(cur + nxt, 10));
-        }
+      if (cur.length <= 2 && nxt.length === 3 && dx <= canvasWidth * 0.08) {
+        stitchedVals.push(parseInt(cur + nxt, 10));
       }
     }
-    const honor = honorCandidates.length ? Math.max(...honorCandidates) : 0;
+
+    const honor = Math.max(0, ...(singleVals.length ? singleVals : [0]), ...stitchedVals);
 
     // Activity (right side)
     const activityTokens = w
