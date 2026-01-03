@@ -26,109 +26,95 @@ function cleanupImage() {
 }
 
 function parseRowsFromOcr(rawText) {
-  // Work line-by-line first (Tesseract usually keeps lines)
   const lines = (rawText || "")
     .split(/\r?\n/)
     .map((l) => l.trim())
-    .filter((l) => l.length);
+    .filter(Boolean);
 
   const rows = [];
 
-  for (const line0 of lines) {
-    // Clean up line but keep spacing
-    const line = line0
+  for (let line of lines) {
+    // Skip header-ish lines
+    if (/members|member\s*ranks|honor\s*points|activity|lvl/i.test(line)) {
+      continue;
+    }
+
+    // Normalize
+    line = line
       .replace(/[“”]/g, '"')
       .replace(/\u00A0/g, " ")
       .replace(/[|]/g, " ")
       .replace(/\s+/g, " ")
       .trim();
 
-    // Must start with a list position: 1..45 (your gang list)
-    const mPos = line.match(/^(\d{1,2})\s+/);
-    if (!mPos) continue;
+    // Must have an activity token
+    const mAct = line.match(/\b(Online|\d+\s*[mhd]\.?)\b/i);
+    if (!mAct) continue;
+    const activity = mAct[1].replace(/\s+/g, "").replace(/\.$/, "");
 
-    const pos = parseInt(mPos[1], 10);
-    if (!(pos >= 1 && pos <= 45)) continue;
-
-    // Activity: Online OR "13m" "2h" "3d" "19h" "1 h." "7 m." etc.
-    const mAct = line.match(/\b(Online|\d+\s*[mhdwy]\.?)\b/i);
-    const activity = mAct ? mAct[1].replace(/\s+/g, "") : "";
-
-    // Honor: prefer the LAST big number group, allow spaces (132 920)
+    // Honor = LAST "big number" group (handles 132 920)
     const honorMatches = [...line.matchAll(/\b\d[\d\s]{2,}\b/g)].map(
       (x) => x[0],
     );
-    let honor = "";
-    if (honorMatches.length) {
-      honor = honorMatches[honorMatches.length - 1].replace(/\s+/g, "");
-    }
+    if (!honorMatches.length) continue;
+    const honorText = honorMatches[honorMatches.length - 1];
+    const honor = parseInt(honorText.replace(/\s+/g, ""), 10);
+    if (!Number.isFinite(honor)) continue;
 
-    // Remove pos and keep the rest for name/lvl/rank parse
-    const rest = line.replace(/^(\d{1,2})\s+/, "").trim();
+    // Level = first 1–2 digit number (but not from honor)
+    // We'll search before the honor chunk so we don't pick 132 or 920 by mistake.
+    const honorIdx = line.lastIndexOf(honorText);
+    const beforeHonor = honorIdx > 0 ? line.slice(0, honorIdx).trim() : line;
 
-    // Find lvl: first standalone 1-2 digit number after name
-    // Example: "Monsta Loe 19 GODFATHER 132 920 1h."
-    const mLvl = rest.match(/\b(\d{1,2})\b/);
+    const mLvl = beforeHonor.match(/\b(\d{1,2})\b/);
     if (!mLvl) continue;
+    const lvl = parseInt(mLvl[1], 10);
+    if (!Number.isFinite(lvl)) continue;
 
-    const lvl = mLvl[1];
-
-    // Name is everything before lvl
-    const name = rest.split(new RegExp(`\\b${lvl}\\b`))[0].trim();
-
-    // Rank is after lvl, strip obvious junk tokens and remove honor/activity fragments
-    let rankPart = rest.split(new RegExp(`\\b${lvl}\\b`))[1] || "";
-    rankPart = rankPart.trim();
-
-    // If honor exists, cut rank before honor digits show up
-    if (honor) {
-      // honor may appear spaced in text, so cut at first digit-run that belongs to honor-ish
-      rankPart = rankPart.replace(/\b\d[\d\s]{2,}\b.*$/g, "").trim();
-    }
-
-    // Also cut at activity if present
-    if (activity) {
-      rankPart = rankPart
-        .replace(new RegExp(`\\b${activity.replace(".", "\\.")}\\b.*$`, "i"), "")
-        .trim();
-      rankPart = rankPart.replace(/\bOnline\b.*$/i, "").trim();
-    }
-
-    // Final cleanup
-    const rank = rankPart
-      .replace(/^[^A-Za-z]+/g, "")
-      .replace(/\s{2,}/g, " ")
+    // Name = text before lvl (strip junk prefixes)
+    const lvlIdx = beforeHonor.indexOf(mLvl[1]);
+    let namePart = beforeHonor.slice(0, lvlIdx).trim();
+    namePart = namePart
+      .replace(/^[^A-Za-z]+/g, "") // drop junk like "[7]" "BR" "- 8" etc
+      .replace(/\b(BR|es)\b/gi, "") // common OCR junk tokens in your output
+      .replace(/\s+/g, " ")
       .trim();
 
-    // Basic sanity: need name + honor
-    if (!name || !honor) continue;
+    if (namePart.length < 3) continue;
 
-    rows.push({
-      pos,
-      name,
-      lvl: parseInt(lvl, 10),
-      rank,
-      honor: parseInt(honor, 10),
-      activity,
-    });
+    // Rank = between lvl and honor (remove obvious OCR junk)
+    let rankPart = beforeHonor.slice(lvlIdx + mLvl[1].length).trim();
+    rankPart = rankPart
+      .replace(/[^\w\s]/g, " ")
+      .replace(/\b[Ss%]\b/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    // If rank is empty, still keep the row (better than dropping it)
+    const rank = rankPart || "";
+
+    rows.push({ name: namePart, lvl, rank, honor, activity });
   }
 
-  // Sort by pos so output is stable
-  rows.sort((a, b) => a.pos - b.pos);
+  // De-dup by name+lvl+honor+activity (OCR sometimes repeats fragments)
+  const seen = new Set();
+  const out = [];
+  for (const r of rows) {
+    const k = `${r.name}|${r.lvl}|${r.honor}|${r.activity}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(r);
+  }
 
-  return rows;
+  return out;
 }
 
 function rowsToCsv(rows) {
-  const header = ["pos", "name", "lvl", "rank", "honor", "activity"];
-  const lines = [header.join(",")];
+  const header = "name,lvl,rank,honor,activity";
+  const lines = [header];
   for (const r of rows) {
-    const safe = (v) => `"${String(v ?? "").replaceAll('"', '""')}"`;
-    lines.push(
-      [r.pos, safe(r.name), r.lvl, safe(r.rank), r.honor, safe(r.activity)].join(
-        ",",
-      ),
-    );
+    const q = (v) => `"${String(v ?? "").replaceAll('"', '""')}"`;
+    lines.push([q(r.name), r.lvl, q(r.rank), r.honor, q(r.activity)].join(","));
   }
   return lines.join("\n");
 }
