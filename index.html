@@ -4,9 +4,11 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>OSRP Gang Scanner → CSV</title>
+
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/cropperjs@1.6.2/dist/cropper.min.css">
   <link rel="stylesheet" href="./style.css" />
 </head>
+
 <body>
   <div class="wrap">
     <h1>OSRP Gang Scanner → CSV</h1>
@@ -50,7 +52,7 @@
           <li>Upload a clean screenshot of the Members list (send as file when possible).</li>
           <li>Crop to only the table (columns).</li>
           <li>Click <b>Extract CSV</b>.</li>
-          <li>Click <b>Copy CSV</b>.</li>
+          <li>Click <b>Copy CSV</b> or <b>Download CSV</b>.</li>
           <li>In Discord run: <b>/import_members</b> and paste the CSV.</li>
         </ol>
       </div>
@@ -59,45 +61,11 @@
     <p class="foot">No login. No API keys. Runs in your browser.</p>
   </div>
 
+  <!-- Libraries first -->
   <script src="https://cdn.jsdelivr.net/npm/cropperjs@1.6.2/dist/cropper.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-  <script>
-    // IMPORTANT: return the exact CSV text you already copy.
-    // Replace the return line with your real source (textarea value, variable, etc).
-    function buildCsvText() {
-      return document.getElementById("csv").value || "";
-    }
 
-    function downloadCsv(filename, csvText) {
-      const blob = new Blob([csvText], { type: "text/csv;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-
-      URL.revokeObjectURL(url);
-    }
-
-    document.getElementById("downloadCsvBtn").addEventListener("click", () => {
-      const csv = buildCsvText().trim();
-      if (!csv) {
-        alert("No CSV to download.");
-        return;
-      }
-
-      const d = new Date();
-      const yyyy = d.getFullYear();
-      const mm = String(d.getMonth() + 1).padStart(2, "0");
-      const dd = String(d.getDate()).padStart(2, "0");
-      const filename = `members_${yyyy}-${mm}-${dd}.csv`;
-
-      downloadCsv(filename, csv);
-    });
-  </script>
+  <!-- Your app last -->
   <script src="./app.js"></script>
 </body>
 </html>
