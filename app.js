@@ -53,12 +53,18 @@ function titleCase(s) {
     .join(" ");
 }
 
-// IMPORTANT: blocks junk like "x30" (icon noise) from becoming 30
-function digitsOnly(token) {
+function digitsStr(token) {
   const s = String(token || "").trim();
   if (!s) return null;
-  if (/[A-Za-z]/.test(s)) return null; // reject letter+digit junk
+  // reject icon-junk like "x30", "ty", etc
+  if (/[A-Za-z]/.test(s)) return null;
+
   const d = s.replace(/[^\d]/g, "");
+  return d ? d : null; // IMPORTANT: keep leading zeros
+}
+
+function digitsInt(token) {
+  const d = digitsStr(token);
   return d ? parseInt(d, 10) : null;
 }
 
@@ -76,7 +82,17 @@ function normalizeActivityFromTokens(tokens) {
 }
 
 function cleanName(words) {
-  const s = words
+  const cleaned = (words || [])
+    .map((t) => String(t || "").trim())
+    .filter(Boolean)
+    // drop pure row numbers and common junk tokens
+    .filter((t) => !/^\d+$/.test(t))
+    .filter((t) => !/^[=•\-\u2022]+$/.test(t))
+    // drop leading bullet-ish prefixes like "=", "-", "•"
+    .map((t) => t.replace(/^[=•\-\u2022]+/g, "").trim())
+    .filter(Boolean);
+
+  const s = cleaned
     .join(" ")
     .replace(/[“”]/g, '"')
     .replace(/\u00A0/g, " ")
@@ -84,8 +100,7 @@ function cleanName(words) {
     .replace(/\s+/g, " ")
     .trim();
 
-  // Remove leading row index like "1" or bullet garbage
-  return s.replace(/^[^\w]+/g, "").replace(/^\d+\s+/, "").trim();
+  return s;
 }
 
 function cleanRank(words) {
@@ -139,12 +154,20 @@ function bestRankMatch(rankText, rankList) {
   const raw = (rankText || "").trim();
   if (!raw || !rankList?.length) return raw;
 
-  const a = raw.toLowerCase().replace(/\s+/g, "");
+  const norm = (s) => s.toLowerCase().replace(/[^a-z]/g, "");
+  const a = norm(raw);
+
+  // 1) Substring match first (handles "Ey Gang Leader R")
+  for (const r of rankList) {
+    const b = norm(r);
+    if (b && a.includes(b)) return r;
+  }
+
   let best = null;
   let bestScore = Infinity;
 
   for (const r of rankList) {
-    const b = r.toLowerCase().replace(/\s+/g, "");
+    const b = norm(r);
     if (!b) continue;
     const d = levenshtein(a, b);
     if (d < bestScore) {
@@ -154,8 +177,7 @@ function bestRankMatch(rankText, rankList) {
   }
 
   // Only snap if it’s reasonably close
-  if (best && bestScore <= 3) return best;
-  return raw;
+  return best && bestScore <= 3 ? best : raw;
 }
 
 function getRankList() {
@@ -311,7 +333,7 @@ function findHeaderCenters(words, canvasWidth) {
 
   // Learn from numeric distributions (fixes iPhone drift)
   const nums = words
-    .map((w) => ({ w, n: digitsOnly(w.text) }))
+    .map((w) => ({ w, n: digitsInt(w.text) }))
     .filter((x) => x.n !== null);
 
   const lvlCandidates = nums
@@ -359,37 +381,34 @@ function parseRowsFromWordBoxes(wordBoxes, canvasWidth, canvasHeight) {
 
   // Stitch numbers inside a band left->right: "30" + "050" => 30050
   function stitchNumber(wordsInBand) {
-    const nums = wordsInBand
-      .map((w) => ({ w, n: digitsOnly(w.text) }))
-      .filter((x) => x.n !== null)
+    const parts = wordsInBand
+      .map((w) => ({ w, d: digitsStr(w.text) }))
+      .filter((x) => x.d !== null)
       .sort((a, b) => a.w.cx - b.w.cx);
 
-    if (!nums.length) return null;
+    if (!parts.length) return null;
 
-    // Join as strings to preserve split chunks
-    const stitched = nums.map((x) => String(x.n)).join("");
-    if (!stitched) return null;
-    return parseInt(stitched, 10);
+    const stitched = parts.map((x) => x.d).join("");
+    return stitched ? parseInt(stitched, 10) : null;
   }
 
   function parseLvl(wordsInBand) {
-    // LVL can be "18" or split "1" "8" or sometimes just "8"
-    const nums = wordsInBand
-      .map((w) => ({ w, n: digitsOnly(w.text) }))
-      .filter((x) => x.n !== null && x.n >= 0 && x.n <= 99)
+    const parts = wordsInBand
+      .map((w) => ({ w, d: digitsStr(w.text) }))
+      .filter((x) => x.d !== null)
       .sort((a, b) => a.w.cx - b.w.cx);
 
-    if (!nums.length) return null;
+    if (!parts.length) return null;
 
-    // If multiple small chunks, stitch (e.g., "1" + "8" => 18)
-    if (nums.length >= 2) {
-      const stitched = nums.map((x) => String(x.n)).join("");
+    // Stitch if it looks like split digits (e.g., "1" + "8")
+    if (parts.length >= 2) {
+      const stitched = parts.map((x) => x.d).join("");
       const v = stitched ? parseInt(stitched, 10) : null;
       if (v !== null && v >= 0 && v <= 99) return v;
     }
 
-    // Otherwise take the most plausible single token
-    return nums[0].n;
+    const v = parseInt(parts[0].d, 10);
+    return v >= 0 && v <= 99 ? v : null;
   }
 
   function normalizeOnline(tokens) {
