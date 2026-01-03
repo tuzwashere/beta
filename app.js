@@ -66,37 +66,15 @@ function digitsOnly(token) {
   return d ? parseInt(d, 10) : null;
 }
 
-function lvlValue(token) {
-  const t = String(token || "").trim();
-  if (!t) return null;
-
-  // normal digits
-  const n = digitsOnly(t);
-  if (n !== null) return n;
-
-  const s = t.replace(/\s+/g, "");
-
-  // OCR turns "11" into these a lot
-  if (/^(n|N)$/.test(s)) return 11;
-  if (/^(ll|LL|ii|II|\|\|)$/.test(s)) return 11;
-  if (/^(lI|Il|I1|1I)$/i.test(s)) return 11;
-
-  // sometimes 10 becomes "lo"/"io"
-  if (/^(lo|io|l0|i0)$/i.test(s)) return 10;
-
-  return null;
-}
-
 function normalizeActivityFromTokens(tokens) {
   const joined = tokens.join(" ").replace(/\s+/g, " ").trim();
   if (!joined) return "n/a";
 
   // Common Online variants
   if (/\bonline\b/i.test(joined)) return "Online";
-  if (/(^|\s)(on|0n|onl|0nl|onli|0nli)(\s|$)/i.test(joined)) return "Online";
+  if (/(^|\s)(on|0n|onl|0nl|onli|0nli|onlin|0nlin)(\s|$)/i.test(joined)) return "Online";
 
-  // If OCR mangles "Online" into a letters-only word (ex: "TERN") in the last column,
-  // it’s still almost certainly Online.
+  // OCR sometimes turns it into letters-only word like SEE / EIT / TERN
   const alpha = joined.replace(/[^A-Za-z]/g, "");
   if (alpha.length >= 3 && alpha.length <= 10) return "Online";
 
@@ -150,7 +128,7 @@ function cleanRank(words) {
     .replace(/\s+/g, " ")
     .trim();
 
-  // Drop 1–2 letter junk tokens (badge/icon noise: EY/WY/NF/NL/UW/RY/etc)
+  // Drop 1–2 letter junk tokens (badge/icon noise)
   cleaned = cleaned
     .split(" ")
     .filter(t => t.length >= 3)
@@ -257,12 +235,14 @@ function getRankList() {
 }
 
 // ---------------------------
-// Preprocess (helps iPhone a lot)
+// Preprocess
 // ---------------------------
-function preprocessCanvas(srcCanvas) {
-  const scale = 2.5;
-  const w = Math.max(1, Math.floor(srcCanvas.width * scale));
-  const h = Math.max(1, Math.floor(srcCanvas.height * scale));
+const PRE_SCALE = 2.5;
+
+// Strong (binary) for general word-box stability
+function preprocessCanvasBinary(srcCanvas) {
+  const w = Math.max(1, Math.floor(srcCanvas.width * PRE_SCALE));
+  const h = Math.max(1, Math.floor(srcCanvas.height * PRE_SCALE));
 
   const out = document.createElement("canvas");
   out.width = w;
@@ -276,37 +256,50 @@ function preprocessCanvas(srcCanvas) {
   const img = ctx.getImageData(0, 0, w, h);
   const data = img.data;
 
-  const sample = [];
-  const step = Math.max(1, Math.floor((w * h) / 12000));
-  for (let p = 0; p < data.length; p += 4 * step) {
-    const r = data[p];
-    const g = data[p + 1];
-    const b = data[p + 2];
-    const y = (r * 0.299 + g * 0.587 + b * 0.114);
-    sample.push(y);
+  let sum = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    const y = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114);
+    sum += y;
   }
-  sample.sort((a, b) => a - b);
+  const mean = sum / (data.length / 4);
 
-  const p05 = sample[Math.floor(sample.length * 0.05)] ?? 0;
-  const p95 = sample[Math.floor(sample.length * 0.95)] ?? 255;
-  const range = Math.max(1, p95 - p05);
-
-  const gamma = 0.9;
+  // tuned for iOS: less aggressive than before
+  const thr = Math.min(225, Math.max(135, mean - 18));
 
   for (let i = 0; i < data.length; i += 4) {
-    const r = data[i];
-    const g = data[i + 1];
-    const b = data[i + 2];
-    let y = (r * 0.299 + g * 0.587 + b * 0.114);
+    const y = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114);
+    const v = y > thr ? 255 : 0;
+    data[i] = data[i + 1] = data[i + 2] = v;
+    data[i + 3] = 255;
+  }
 
-    y = (y - p05) / range;
-    y = Math.max(0, Math.min(1, y));
-    y = Math.pow(y, gamma);
+  ctx.putImageData(img, 0, 0);
+  return out;
+}
 
-    const v = Math.round(y * 255);
-    data[i] = v;
-    data[i + 1] = v;
-    data[i + 2] = v;
+// Soft (grayscale + contrast) for numeric OCR (fixes 6 vs 8 a lot)
+function preprocessCanvasSoft(srcCanvas) {
+  const w = Math.max(1, Math.floor(srcCanvas.width * PRE_SCALE));
+  const h = Math.max(1, Math.floor(srcCanvas.height * PRE_SCALE));
+
+  const out = document.createElement("canvas");
+  out.width = w;
+  out.height = h;
+
+  const ctx = out.getContext("2d", { willReadFrequently: true });
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(srcCanvas, 0, 0, w, h);
+
+  const img = ctx.getImageData(0, 0, w, h);
+  const data = img.data;
+
+  // grayscale + mild contrast boost
+  for (let i = 0; i < data.length; i += 4) {
+    const y = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114);
+    let v = (y - 128) * 1.35 + 128;   // contrast
+    v = Math.max(0, Math.min(255, v));
+    data[i] = data[i + 1] = data[i + 2] = v;
     data[i + 3] = 255;
   }
 
@@ -315,7 +308,7 @@ function preprocessCanvas(srcCanvas) {
 }
 
 // ---------------------------
-// Word-box parsing (the real fix)
+// Word-box parsing
 // ---------------------------
 function normalizeWord(w) {
   const text = String(w.text || "").trim();
@@ -356,21 +349,8 @@ function groupIntoRows(words) {
     }
   }
 
-  // Merge tiny rows into nearest
-  const merged = [];
-  for (const r of rows) {
-    if (!merged.length) { merged.push(r); continue; }
-    const prev = merged[merged.length - 1];
-    if (r.words.length <= 2 && Math.abs(r.y - prev.y) <= gap * 1.2) {
-      prev.words.push(...r.words);
-      prev.y = (prev.y + r.y) / 2;
-    } else {
-      merged.push(r);
-    }
-  }
-
   // Remove obvious header row(s)
-  const out = merged.filter(r => {
+  const out = rows.filter(r => {
     const line = r.words.map(w => w.text).join(" ").toLowerCase();
     if (/(members|lvl|member\s*ranks|honor|points|activity)/i.test(line) && r.words.length <= 14) {
       return false;
@@ -379,12 +359,12 @@ function groupIntoRows(words) {
   });
 
   for (const r of out) r.words.sort((a, b) => a.cx - b.cx);
-  return out;
+  return { rows: out, gap };
 }
 
-// PATCH: learn Activity column like LVL/HONOR
+// Learn column anchors + LEFT bound for Activity (fixes Online being skipped)
 function findHeaderCenters(words, canvasWidth) {
-  const topWords = [...words].sort((a, b) => a.cy - b.cy).slice(0, 160);
+  const topWords = [...words].sort((a, b) => a.cy - b.cy).slice(0, 180);
 
   const pick = (regexList) => {
     for (const re of regexList) {
@@ -399,7 +379,7 @@ function findHeaderCenters(words, canvasWidth) {
   let activityCx = pick([/^activity$/i, /^actlity$/i, /^actlvity$/i, /^act$/i]);
 
   const nums = words
-    .map(w => ({ w, n: lvlValue(w.text) }))
+    .map(w => ({ w, n: digitsOnly(w.text) }))
     .filter(x => x.n !== null);
 
   const lvlCandidates = nums
@@ -420,22 +400,28 @@ function findHeaderCenters(words, canvasWidth) {
     honorCx = xs[Math.floor(xs.length / 2)];
   }
 
+  // Activity candidates
   const activityCandidates = words
-    .filter(w => w.cx > canvasWidth * 0.68)
+    .filter(w => w.cx > canvasWidth * 0.62) // wider net than before
     .filter(w => {
       const t = String(w.text || "").trim();
 
-      // normal cases
       if (/\bonline\b/i.test(t)) return true;
-      if (/^(on|0n)$/i.test(t)) return true;
+      if (/^(on|0n|onl|0nl)$/i.test(t)) return true;
       if (/\b\d{1,2}\s*[mhd]\.?\b/i.test(t)) return true;
 
-      // "Online" mangled into letters-only token (TERN, TERN., etc)
       const alpha = t.replace(/[^A-Za-z]/g, "");
       if (alpha.length >= 3 && alpha.length <= 10) return true;
 
       return false;
     });
+
+  let activityLeft = canvasWidth * 0.74;
+  if (activityCandidates.length >= 2) {
+    const lefts = activityCandidates.map(w => w.x0).sort((a, b) => a - b);
+    const p15 = lefts[Math.floor(lefts.length * 0.15)];
+    activityLeft = Math.max(canvasWidth * 0.60, p15 - canvasWidth * 0.02);
+  }
 
   if (activityCandidates.length >= 3) {
     const xs = activityCandidates.map(w => w.cx).sort((a, b) => a - b);
@@ -446,25 +432,40 @@ function findHeaderCenters(words, canvasWidth) {
     lvlCx: lvlCx ?? canvasWidth * 0.47,
     honorCx: honorCx ?? canvasWidth * 0.80,
     activityCx: activityCx ?? canvasWidth * 0.93,
+    activityLeft,
   };
 }
 
-function parseRowsFromWordBoxes(wordBoxes, canvasWidth) {
-  const rows = groupIntoRows(wordBoxes);
+function parseRowsFromWordBoxes(wordBoxes, numericBoxes, canvasWidth) {
+  const grouped = groupIntoRows(wordBoxes);
+  const rows = grouped.rows;
+  const gap = grouped.gap;
   if (!rows.length) return [];
 
-  const { lvlCx, honorCx, activityCx } = findHeaderCenters(wordBoxes, canvasWidth);
+  const { lvlCx, honorCx, activityCx, activityLeft } = findHeaderCenters(wordBoxes, canvasWidth);
   const rankList = getRankList();
 
   const out = [];
 
+  // helper: honor tokens from numeric OCR matched by row Y
+  function honorTokensForRow(rowY, honorLeft, honorRight) {
+    if (!numericBoxes?.length) return [];
+    return numericBoxes
+      .filter(w => w && w.conf >= 25)
+      .filter(w => Math.abs(w.cy - rowY) <= gap * 1.05)
+      .filter(w => w.cx >= honorLeft && w.cx <= honorRight)
+      .map(w => ({ x: w, n: digitsOnly(w.text) }))
+      .filter(z => z.n !== null)
+      .sort((a, b) => a.x.cx - b.x.cx);
+  }
+
   for (const row of rows) {
     const w = row.words;
 
-    // LVL: choose best numeric token near lvlCx (distance + confidence weighted)
+    // LVL: choose best numeric token near lvlCx
     const lvlBand = canvasWidth * 0.08;
     const lvlCandidates = w
-      .map(x => ({ x, n: lvlValue(x.text) }))
+      .map(x => ({ x, n: digitsOnly(x.text) }))
       .filter(z => z.n !== null && z.n >= 1 && z.n <= 99)
       .filter(z => Math.abs(z.x.cx - lvlCx) <= lvlBand);
 
@@ -473,109 +474,60 @@ function parseRowsFromWordBoxes(wordBoxes, canvasWidth) {
     lvlCandidates.sort((a, b) => {
       const da = Math.abs(a.x.cx - lvlCx) / lvlBand;
       const db = Math.abs(b.x.cx - lvlCx) / lvlBand;
-
       const ca = 1 - (Math.max(0, Math.min(100, a.x.conf)) / 100);
       const cb = 1 - (Math.max(0, Math.min(100, b.x.conf)) / 100);
-
-      // distance matters, but low confidence gets penalized
-      const scoreA = da * 0.65 + ca * 0.35;
-      const scoreB = db * 0.65 + cb * 0.35;
-      return scoreA - scoreB;
+      return (da * 0.65 + ca * 0.35) - (db * 0.65 + cb * 0.35);
     });
 
     const lvl = lvlCandidates[0].n;
 
-    // HONOR (row-robust): pick from numeric tokens in the row excluding:
-    // - row index on far left
-    // - the LVL token
-    // - time digits in the Activity column (ex: "2" + "h.")
-    // Then stitch adjacent chunks (ex: "26" + "200" => 26200, "133" + "040" => 133040)
-    const numsAll = w
-      .map(x => {
-        const raw = String(x.text || "").trim();
-        const n = digitsOnly(raw);
-        if (n === null) return null;
-        const d = raw.replace(/\D/g, ""); // preserve chunk digits (keeps "040")
-        if (!d) return null;
-        return { x, n, d };
-      })
-      .filter(Boolean)
-      .sort((a, b) => a.x.cx - b.x.cx);
+    // HONOR region: between honor column and activity column
+    const honorLeft = honorCx - canvasWidth * 0.18;
+    const honorRight = activityCx - canvasWidth * 0.14;
 
-    // Identify which numeric token we used for LVL (closest to lvlCx within lvlBand)
-    const lvlBand2 = canvasWidth * 0.09;
-    let lvlToken = null;
-    {
-      let best = null;
-      let bestDist = Infinity;
-      for (const t of numsAll) {
-        if (t.n < 1 || t.n > 99) continue;
-        const dist = Math.abs(t.x.cx - lvlCx);
-        if (dist <= lvlBand2 && dist < bestDist) {
-          bestDist = dist;
-          best = t;
+    // Prefer numeric OCR (fixes 6->8 cases a lot)
+    let honorRaw = honorTokensForRow(row.y, honorLeft, honorRight);
+
+    // fallback to main OCR if numeric pass found nothing
+    if (!honorRaw.length) {
+      honorRaw = w
+        .filter(x => x.cx >= honorLeft && x.cx <= honorRight)
+        .map(x => ({ x, n: digitsOnly(x.text) }))
+        .filter(z => z.n !== null)
+        .sort((a, b) => a.x.cx - b.x.cx);
+    }
+
+    // Keep only likely honor chunks
+    const parts = [];
+    for (let i = 0; i < honorRaw.length; i++) {
+      const cur = honorRaw[i];
+      const curLen = String(cur.n).length;
+
+      if (cur.n === 0) { parts.push(cur); continue; }
+
+      if (curLen >= 3) { parts.push(cur); continue; }
+
+      const next = honorRaw[i + 1];
+      if (next && String(next.n).length === 3) {
+        if ((next.x.cx - cur.x.cx) <= canvasWidth * 0.08) {
+          parts.push(cur);
         }
       }
-      lvlToken = best;
     }
 
-    // Helper: detect if a small number is actually part of Activity (digit followed by h/m/d token nearby)
-    function isTimeDigit(t) {
-      if (t.n > 99) return false;
-      // look for "h." / "m." / "d." token to the right within a small x range
-      for (const ww of w) {
-        const dt = String(ww.text || "").trim();
-        if (!dt) continue;
-        if (!/^[mhd]\.?$/i.test(dt)) continue;
-        if (ww.cx > t.x.cx && (ww.cx - t.x.cx) <= canvasWidth * 0.08) return true;
-      }
-      return false;
-    }
-
-    // Filter down to honor candidates
-    const honorCandidates = numsAll.filter(t => {
-      // drop far-left row index like "1", "2", etc
-      if (t.x.cx < canvasWidth * 0.12 && t.n <= 99) return false;
-
-      // drop the LVL token we picked
-      if (lvlToken && t === lvlToken) return false;
-
-      // drop activity time digits
-      if (isTimeDigit(t)) return false;
-
-      return true;
-    });
-
-    // Stitch adjacent numeric chunks by proximity
-    const groups = [];
-    for (const t of honorCandidates) {
-      const last = groups[groups.length - 1];
-      if (!last) {
-        groups.push({ ds: [t.d], lastCx: t.x.cx });
-        continue;
-      }
-      const dx = t.x.cx - last.lastCx;
-      if (dx <= canvasWidth * 0.075) {
-        last.ds.push(t.d);
-        last.lastCx = t.x.cx;
-      } else {
-        groups.push({ ds: [t.d], lastCx: t.x.cx });
-      }
-    }
-
-    // Choose honor as the largest stitched value (or largest single token as fallback)
     let honor = 0;
-    for (const g of groups) {
-      const stitched = g.ds.join("");
-      if (!stitched) continue;
-      const val = parseInt(stitched, 10);
-      if (Number.isFinite(val)) honor = Math.max(honor, val);
-    }
-    if (honor === 0 && honorCandidates.length) {
-      honor = honorCandidates.reduce((mx, t) => Math.max(mx, t.n), 0);
+    if (parts.length) {
+      const stitched = parts.map(p => String(p.n)).join("");
+      honor = stitched ? parseInt(stitched, 10) : 0;
+      if (honor > 999999 || honor < 0) {
+        const best = honorRaw.reduce((mx, z) => Math.max(mx, z.n), 0);
+        honor = best || 0;
+      }
+    } else {
+      honor = 0;
     }
 
-    // Name: everything clearly left of lvl column
+    // Name: everything left of lvl
     const nameWords = w
       .filter(x => x.cx < (lvlCx - canvasWidth * 0.06))
       .map(x => x.text);
@@ -583,7 +535,7 @@ function parseRowsFromWordBoxes(wordBoxes, canvasWidth) {
     const name = cleanName(nameWords);
     if (!name || name.length < 2) continue;
 
-    // Rank: between lvl and honor, only letter-ish tokens
+    // Rank: between lvl and honor
     const rankWords = w
       .filter(x => x.cx > (lvlCx + canvasWidth * 0.03) && x.cx < (honorCx - canvasWidth * 0.06))
       .filter(x => /[A-Za-z]/.test(x.text))
@@ -592,9 +544,9 @@ function parseRowsFromWordBoxes(wordBoxes, canvasWidth) {
     let rank = cleanRank(rankWords);
     rank = bestRankMatch(rank, rankList);
 
-    // Activity: far-right tokens
+    // Activity: use activityLeft (wide enough for "Online")
     const activityTokens = w
-      .filter(x => x.cx > (activityCx - canvasWidth * 0.12))
+      .filter(x => x.x1 >= activityLeft) // use right-edge overlap instead of center
       .map(x => x.text);
 
     const activity = normalizeActivityFromTokens(activityTokens);
@@ -631,6 +583,22 @@ async function doOCR(canvas) {
   return data;
 }
 
+// Numeric-only OCR pass to stabilize honor digits
+async function doOCRNumeric(canvas) {
+  setStatus("OCR (numbers)…");
+  const { data } = await Tesseract.recognize(canvas, "eng", {
+    tessedit_char_whitelist: "0123456789",
+    classify_bln_numeric_mode: "1",
+    logger: (m) => {
+      if (m.status) {
+        const pct = m.progress ? ` (${Math.round(m.progress * 100)}%)` : "";
+        setStatus(`numbers: ${m.status}${pct}`);
+      }
+    },
+  });
+  return data;
+}
+
 // ---------------------------
 // Ranks persistence
 // ---------------------------
@@ -638,21 +606,7 @@ function loadRanks() {
   if (!ranksEl) return;
   const saved = localStorage.getItem("osrp_ranks") || "";
 
-  const defaults = [
-    "Gang Leader",
-    "Deputy",
-    "Cutthroat",
-    "Fighter",
-    "Trainee",
-    "Newbie",
-    "Boss",
-    "Donn",
-    "Godfather",
-    "Top Executives",
-    "Generals",
-    "Top Shooters",
-    "Foot Soldiers",
-  ].join("\n");
+  const defaults = DEFAULT_RANKS.join("\n");
 
   if (saved.trim()) {
     ranksEl.value = saved.trim();
@@ -710,7 +664,6 @@ downloadBtn?.addEventListener("click", () => {
 // ---------------------------
 if (appendBtn) {
   appendBtn.addEventListener("click", () => {
-    // Next file selection should append (not clear)
     appendMode = true;
     fileEl.click();
   });
@@ -720,14 +673,12 @@ fileEl.addEventListener("change", () => {
   const f = fileEl.files && fileEl.files[0];
   if (!f) return;
 
-  // If user picked a new file normally (not via append button), start fresh.
   if (!appendMode) {
     csvEl.value = "";
     rawEl.value = "";
     allRows = [];
     allRawBlocks = [];
   } else {
-    // Keep existing output; this new image will append.
     setStatus("Appending image… crop and Extract to add rows.");
   }
 
@@ -773,25 +724,28 @@ extractBtn.addEventListener("click", async () => {
       imageSmoothingQuality: "high",
     });
 
-    const pre = preprocessCanvas(cropped);
-    const data = await doOCR(pre);
+    // Two preprocesses: binary for general parsing, soft for numeric stability
+    const preText = preprocessCanvasBinary(cropped);
+    const preNum = preprocessCanvasSoft(cropped);
 
-    const wordBoxes = (data.words || [])
-      .map(normalizeWord)
-      .filter(Boolean);
+    const data = await doOCR(preText);
+    const dataNum = await doOCRNumeric(preNum);
+
+    const wordBoxes = (data.words || []).map(normalizeWord).filter(Boolean);
+    const numericBoxes = (dataNum.words || []).map(normalizeWord).filter(Boolean);
 
     if (!wordBoxes.length) {
       setStatus("No OCR words found. Try a clearer screenshot.");
       return;
     }
 
-    const rows = parseRowsFromWordBoxes(wordBoxes, pre.width);
+    const rows = parseRowsFromWordBoxes(wordBoxes, numericBoxes, preText.width);
     if (!rows.length) {
       setStatus("No rows detected. Crop tighter around ONLY the rows and try again.");
       return;
     }
 
-    // Raw OCR: append blocks when in appendMode
+    // Raw OCR
     const rawBlock = (data.text || "").trim();
     if (appendMode) {
       if (rawBlock) allRawBlocks.push(rawBlock);
@@ -801,14 +755,13 @@ extractBtn.addEventListener("click", async () => {
       rawEl.value = rawBlock;
     }
 
-    // Rows: merge into allRows when appending
+    // Merge rows when appending
     function keyRow(r) {
       return (r.name || "").toLowerCase().trim();
     }
 
     if (appendMode) {
       const map = new Map(allRows.map(r => [keyRow(r), r]));
-
       for (const r of rows) {
         const k = keyRow(r);
         if (!k) continue;
@@ -816,7 +769,6 @@ extractBtn.addEventListener("click", async () => {
         if (!map.has(k)) {
           map.set(k, r);
         } else {
-          // update existing: keep highest honor, prefer non-empty rank/activity, prefer latest lvl if present
           const prev = map.get(k);
           prev.lvl = r.lvl ?? prev.lvl;
           prev.rank = (r.rank && r.rank.trim()) ? r.rank : prev.rank;
@@ -824,18 +776,16 @@ extractBtn.addEventListener("click", async () => {
           prev.honor = Math.max(prev.honor || 0, r.honor || 0);
         }
       }
-
       allRows = Array.from(map.values());
     } else {
       allRows = rows.slice();
     }
 
     csvEl.value = rowsToCsv(allRows);
-    setStatus(`Total ${allRows.length} row(s) in CSV. ${appendMode ? "Appended." : "Extracted."}`);
+    setStatus(`Total ${allRows.length} row(s) in CSV. ${appendMode ? "Appended." : "Extracted."} (${BUILD})`);
     copyBtn.disabled = false;
     downloadBtn.disabled = false;
 
-    // After a successful append extraction, turn appendMode off so normal "Choose File" starts fresh next time
     appendMode = false;
   } catch (e) {
     console.error(e);
