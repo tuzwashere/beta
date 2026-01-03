@@ -167,6 +167,212 @@ function normalizeRank(raw, hints) {
   return titleCase(pickClosestRank(cleaned, hints));
 }
 
+function normalizeSpaces(s) {
+  return (s || "").replace(/\s+/g, " ").trim();
+}
+
+function isMostlyLetters(s) {
+  return /^[A-Za-z][A-Za-z\s'._-]*$/.test(s);
+}
+
+function cleanNameFromWords(words) {
+  let name = normalizeSpaces(words.join(" "));
+  name = name
+    .replace(/[“”]/g, '"')
+    .replace(/^[^A-Za-z]+/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const parts = name.split(" ").filter(Boolean);
+  while (parts.length && parts[0].length <= 2 && !isMostlyLetters(parts[0])) {
+    parts.shift();
+  }
+  return parts.join(" ").trim();
+}
+
+function extractActivityFromWords(words) {
+  const text = normalizeSpaces(words.join(" "));
+  if (!text) return "n/a";
+  if (/\bonline\b/i.test(text)) return "Online";
+
+  const m = text.match(/\b(\d{1,2})\s*([mhd])\b/i);
+  if (!m) return "n/a";
+  return `${parseInt(m[1], 10)}${m[2].toLowerCase()}`;
+}
+
+function parseHonorFromWords(words) {
+  let best = null;
+
+  for (const w of words) {
+    const digits = (w || "").replace(/[^\d]/g, "");
+    if (!digits) continue;
+    best = digits;
+  }
+
+  if (!best) return 0;
+  return parseInt(best, 10) || 0;
+}
+
+function normalizeRankText(raw) {
+  if (!raw) return "";
+  let cleaned = raw
+    .toUpperCase()
+    .replace(/[^A-Z\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  cleaned = cleaned
+    .replace(/\bSOSS\b/g, "BOSS")
+    .replace(/\bPONN?\b/g, "DONN")
+    .replace(/\bOWN\b/g, "DONN");
+
+  return cleaned
+    .toLowerCase()
+    .split(" ")
+    .filter(Boolean)
+    .map((w) => w[0].toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
+function getRankList() {
+  if (!ranksEl) return [];
+  return (ranksEl.value || "")
+    .split(/\r?\n/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+
+function bestRankMatch(rankText, rankList) {
+  const r = normalizeSpaces(rankText);
+  if (!r) return "";
+
+  if (!rankList.length) return normalizeRankText(r);
+
+  const rLow = r.toLowerCase();
+  for (const cand of rankList) {
+    if (cand.toLowerCase() === rLow) return cand;
+  }
+  for (const cand of rankList) {
+    if (rLow.includes(cand.toLowerCase()) || cand.toLowerCase().includes(rLow)) {
+      return cand;
+    }
+  }
+
+  return normalizeRankText(r);
+}
+
+function groupWordsIntoRows(words, height) {
+  const tol = Math.max(12, Math.round(height * 0.02));
+  const sorted = [...words].sort(
+    (a, b) =>
+      (a.bbox.y0 + a.bbox.y1) / 2 - (b.bbox.y0 + b.bbox.y1) / 2
+  );
+
+  const rows = [];
+  for (const w of sorted) {
+    const yMid = (w.bbox.y0 + w.bbox.y1) / 2;
+    let placed = false;
+
+    for (const row of rows) {
+      if (Math.abs(yMid - row.yMid) <= tol) {
+        row.words.push(w);
+        row.yMid = (row.yMid * (row.words.length - 1) + yMid) / row.words.length;
+        placed = true;
+        break;
+      }
+    }
+
+    if (!placed) rows.push({ yMid, words: [w] });
+  }
+
+  for (const r of rows) {
+    r.words.sort(
+      (a, b) =>
+        (a.bbox.x0 + a.bbox.x1) / 2 - (b.bbox.x0 + b.bbox.x1) / 2
+    );
+  }
+
+  return rows;
+}
+
+function parseRowsFromTesseract(data, tableWidth, tableHeight) {
+  const rankList = getRankList();
+
+  const words = (data.words || [])
+    .filter((w) => (w.text || "").trim().length > 0)
+    .filter((w) => (w.confidence ?? 0) >= 40);
+
+  if (!words.length) return [];
+
+  const col = {
+    name: [0.12, 0.43],
+    lvl: [0.43, 0.52],
+    rank: [0.52, 0.74],
+    honor: [0.74, 0.88],
+    activity: [0.88, 0.97],
+  };
+
+  const rows = [];
+  const grouped = groupWordsIntoRows(words, tableHeight);
+
+  for (const g of grouped) {
+    const buckets = { name: [], lvl: [], rank: [], honor: [], activity: [] };
+
+    for (const w of g.words) {
+      const xMid = (w.bbox.x0 + w.bbox.x1) / 2;
+      const xr = xMid / tableWidth;
+      const t = (w.text || "").trim();
+
+      const inRange = (key) => xr >= col[key][0] && xr < col[key][1];
+
+      if (inRange("name")) buckets.name.push(t);
+      else if (inRange("lvl")) buckets.lvl.push(t);
+      else if (inRange("rank")) buckets.rank.push(t);
+      else if (inRange("honor")) buckets.honor.push(t);
+      else if (inRange("activity")) buckets.activity.push(t);
+    }
+
+    const name = cleanNameFromWords(buckets.name);
+    if (!name || name.length < 3) continue;
+
+    const lvlDigits = (buckets.lvl.join(" ").match(/\b(\d{1,2})\b/) || [])[1];
+    const lvl = lvlDigits ? parseInt(lvlDigits, 10) : null;
+    if (!Number.isFinite(lvl)) continue;
+
+    const rankRaw = normalizeSpaces(buckets.rank.join(" "));
+    const rank = bestRankMatch(rankRaw, rankList);
+
+    let honor = 0;
+    {
+      const candidates = buckets.honor
+        .map((t) => ({ t, digits: (t || "").replace(/[^\d]/g, "") }))
+        .filter((x) => x.digits.length > 0);
+
+      if (candidates.length) {
+        const picked = candidates[candidates.length - 1].digits;
+        honor = parseInt(picked, 10) || 0;
+      } else {
+        honor = parseHonorFromWords(buckets.honor);
+      }
+    }
+
+    const activity = extractActivityFromWords(buckets.activity);
+
+    rows.push({ name, lvl, rank, honor, activity });
+  }
+
+  const seen = new Set();
+  const out = [];
+  for (const r of rows) {
+    const k = `${r.name}|${r.lvl}|${r.rank}|${r.honor}|${r.activity}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(r);
+  }
+
+  return out;
+}
+
 function parseRowsFromOcr(rawText) {
   const hints = getRankHints();
   const lines = (rawText || "")
@@ -393,7 +599,7 @@ extractBtn.addEventListener("click", async () => {
     // Always show raw OCR (even if no rows parse)
     rawEl.value = data && data.text ? data.text : "";
 
-    const rows = parseRowsFromOcr(rawEl.value);
+    const rows = parseRowsFromTesseract(data, canvas.width, canvas.height);
     if (!rows.length) {
       csvEl.value = "";
       setStatus("No rows detected. Crop tighter around ONLY the rows and try again.");
