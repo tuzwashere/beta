@@ -111,8 +111,23 @@ function cleanRank(words) {
     .replace(/\s+/g, " ")
     .trim();
 
-  // Keep letters/spaces only (badge icons cause junk)
-  const cleaned = s.toUpperCase().replace(/[^A-Z\s]/g, " ").replace(/\s+/g, " ").trim();
+  // Keep letters/spaces only
+  let cleaned = s.toUpperCase().replace(/[^A-Z\s]/g, " ").replace(/\s+/g, " ").trim();
+
+  // Drop 1–2 letter junk tokens (badge/icon noise like "EY", "WY", "NF", "NL", etc)
+  cleaned = cleaned
+    .split(" ")
+    .filter((t) => t.length >= 3)
+    .join(" ")
+    .trim();
+
+  // Fix super-common OCR rank glitches
+  cleaned = cleaned
+    .replace(/\bPONN\b/g, "DONN")
+    .replace(/\bPON\b/g, "DONN")
+    .replace(/\bSOSS\b/g, "BOSS")
+    .replace(/\bB0SS\b/g, "BOSS");
+
   return titleCase(cleaned);
 }
 
@@ -346,11 +361,11 @@ function findHeaderCenters(words, canvasWidth) {
   let honorCx = pick([/^honor$/i, /^points$/i, /^honorpoints$/i, /^honor\s*points$/i]);
   let activityCx = pick([/^activity$/i, /^actlity$/i, /^actlvity$/i, /^act$/i]);
 
-  // Learn from numeric distributions (fixes iPhone drift)
   const nums = words
     .map((w) => ({ w, n: digitsInt(w.text) }))
     .filter((x) => x.n !== null);
 
+  // Learn LVL from 1–2 digit column
   const lvlCandidates = nums
     .filter((x) => x.n >= 1 && x.n <= 99)
     .filter((x) => x.w.cx > canvasWidth * 0.25 && x.w.cx < canvasWidth * 0.6);
@@ -360,6 +375,7 @@ function findHeaderCenters(words, canvasWidth) {
     lvlCx = xs[Math.floor(xs.length / 2)];
   }
 
+  // Learn HONOR from right-side numbers (including 0)
   const honorCandidates = nums
     .filter((x) => x.n >= 100 || x.n === 0)
     .filter((x) => x.w.cx > canvasWidth * 0.6 && x.w.cx < canvasWidth * 0.92);
@@ -367,6 +383,21 @@ function findHeaderCenters(words, canvasWidth) {
   if (honorCandidates.length >= 4) {
     const xs = honorCandidates.map((x) => x.w.cx).sort((a, b) => a - b);
     honorCx = xs[Math.floor(xs.length / 2)];
+  }
+
+  // Learn ACTIVITY from tokens like Online / on / 0n / "7 h." / "4 d."
+  const activityCandidates = words
+    .filter(
+      (w) =>
+        /\bonline\b/i.test(w.text) ||
+        /^(on|0n)$/i.test(w.text.trim()) ||
+        /\b\d{1,2}\s*[mhd]\.?\b/i.test(w.text),
+    )
+    .filter((w) => w.cx > canvasWidth * 0.7);
+
+  if (activityCandidates.length >= 3) {
+    const xs = activityCandidates.map((w) => w.cx).sort((a, b) => a - b);
+    activityCx = xs[Math.floor(xs.length / 2)];
   }
 
   return {
@@ -519,7 +550,23 @@ async function doOCR(canvas) {
 function loadRanks() {
   if (!ranksEl) return;
   const saved = localStorage.getItem("osrp_ranks") || "";
-  if (!ranksEl.value.trim()) ranksEl.value = saved.trim();
+  const defaults = [
+    "Gang Leader",
+    "Deputy",
+    "Cutthroat",
+    "Fighter",
+    "Trainee",
+    "Newbie",
+    "Boss",
+    "Donn",
+    "Godfather",
+  ].join("\n");
+
+  if (saved.trim()) {
+    ranksEl.value = saved.trim();
+  } else if (!ranksEl.value.trim()) {
+    ranksEl.value = defaults;
+  }
 }
 function saveRanks() {
   if (!ranksEl) return;
