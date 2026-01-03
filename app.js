@@ -1,7 +1,7 @@
 // OSRP Gang Scanner -> CSV (robust word-box parsing for mobile/desktop)
 // Drop-in app.js
 
-const BUILD = "v10"; // bump when you deploy
+const BUILD = "v11"; // bump when you deploy
 document.title = `OSRP Gang Scanner → CSV (${BUILD})`;
 
 const fileEl = document.getElementById("file");
@@ -237,12 +237,12 @@ function getRankList() {
 // ---------------------------
 // Preprocess
 // ---------------------------
-const PRE_SCALE = 2.5;
-
-// Strong (binary) for general word-box stability
-function preprocessCanvasBinary(srcCanvas) {
-  const w = Math.max(1, Math.floor(srcCanvas.width * PRE_SCALE));
-  const h = Math.max(1, Math.floor(srcCanvas.height * PRE_SCALE));
+function preprocessCanvas(srcCanvas) {
+  // Scale up for OCR, but DO NOT hard-threshold to black/white
+  // (that kills green "Online" and makes 6→8 more likely).
+  const scale = 3.0;
+  const w = Math.max(1, Math.floor(srcCanvas.width * scale));
+  const h = Math.max(1, Math.floor(srcCanvas.height * scale));
 
   const out = document.createElement("canvas");
   out.width = w;
@@ -256,49 +256,34 @@ function preprocessCanvasBinary(srcCanvas) {
   const img = ctx.getImageData(0, 0, w, h);
   const data = img.data;
 
+  // Compute mean/stdev luminance for contrast normalization
   let sum = 0;
+  let sum2 = 0;
+  const n = data.length / 4;
+
   for (let i = 0; i < data.length; i += 4) {
-    const y = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114);
+    const y = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
     sum += y;
-  }
-  const mean = sum / (data.length / 4);
-
-  // tuned for iOS: less aggressive than before
-  const thr = Math.min(225, Math.max(135, mean - 18));
-
-  for (let i = 0; i < data.length; i += 4) {
-    const y = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114);
-    const v = y > thr ? 255 : 0;
-    data[i] = data[i + 1] = data[i + 2] = v;
-    data[i + 3] = 255;
+    sum2 += y * y;
   }
 
-  ctx.putImageData(img, 0, 0);
-  return out;
-}
+  const mean = sum / n;
+  const var_ = Math.max(1, (sum2 / n) - mean * mean);
+  const std = Math.sqrt(var_);
 
-// Soft (grayscale + contrast) for numeric OCR (fixes 6 vs 8 a lot)
-function preprocessCanvasSoft(srcCanvas) {
-  const w = Math.max(1, Math.floor(srcCanvas.width * PRE_SCALE));
-  const h = Math.max(1, Math.floor(srcCanvas.height * PRE_SCALE));
+  // Normalize contrast (keeps edges + preserves “Online” better than B/W)
+  // Target std ~ 70
+  const gain = 70 / std;
 
-  const out = document.createElement("canvas");
-  out.width = w;
-  out.height = h;
-
-  const ctx = out.getContext("2d", { willReadFrequently: true });
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = "high";
-  ctx.drawImage(srcCanvas, 0, 0, w, h);
-
-  const img = ctx.getImageData(0, 0, w, h);
-  const data = img.data;
-
-  // grayscale + mild contrast boost
   for (let i = 0; i < data.length; i += 4) {
-    const y = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114);
-    let v = (y - 128) * 1.35 + 128;   // contrast
-    v = Math.max(0, Math.min(255, v));
+    const y = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+
+    let v = (y - mean) * gain + 128;     // normalize
+    v = Math.max(0, Math.min(255, v));   // clamp
+
+    // slight gamma to help thin text
+    v = Math.pow(v / 255, 0.92) * 255;
+
     data[i] = data[i + 1] = data[i + 2] = v;
     data[i + 3] = 255;
   }
@@ -326,16 +311,33 @@ function normalizeWord(w) {
   return { text, x0, x1, y0, y1, cx, cy, conf };
 }
 
-function groupIntoRows(words) {
-  const ws = words.filter(w => w && w.text && w.conf >= 25);
-  ws.sort((a, b) => a.cy - b.cy);
+function groupIntoRows(words, canvasWidth) {
+  const ws = words.filter(w => w && w.text);
 
-  const heights = ws.map(w => Math.max(1, w.y1 - w.y0)).sort((a, b) => a - b);
+  // Keep good-confidence words everywhere,
+  // and also keep lower-confidence words in the Activity (far-right) area.
+  const kept = ws.filter(w => {
+    const conf = (typeof w.conf === "number") ? w.conf : 100;
+
+    if (conf >= 20) return true;
+
+    // Activity column text is small/green -> often low confidence.
+    if (w.cx >= canvasWidth * 0.82 && conf >= 8) return true;
+
+    // Honor digits can also be low confidence sometimes
+    if (w.cx >= canvasWidth * 0.60 && w.cx <= canvasWidth * 0.92 && conf >= 10) return true;
+
+    return false;
+  });
+
+  kept.sort((a, b) => a.cy - b.cy);
+
+  const heights = kept.map(w => Math.max(1, w.y1 - w.y0)).sort((a, b) => a - b);
   const medianH = heights.length ? heights[Math.floor(heights.length / 2)] : 18;
   const gap = Math.max(10, Math.min(40, medianH * 0.9));
 
   const rows = [];
-  for (const w of ws) {
+  for (const w of kept) {
     const last = rows[rows.length - 1];
     if (!last) {
       rows.push({ y: w.cy, words: [w] });
@@ -349,8 +351,21 @@ function groupIntoRows(words) {
     }
   }
 
+  // Merge tiny rows into nearest
+  const merged = [];
+  for (const r of rows) {
+    if (!merged.length) { merged.push(r); continue; }
+    const prev = merged[merged.length - 1];
+    if (r.words.length <= 2 && Math.abs(r.y - prev.y) <= gap * 1.2) {
+      prev.words.push(...r.words);
+      prev.y = (prev.y + r.y) / 2;
+    } else {
+      merged.push(r);
+    }
+  }
+
   // Remove obvious header row(s)
-  const out = rows.filter(r => {
+  const out = merged.filter(r => {
     const line = r.words.map(w => w.text).join(" ").toLowerCase();
     if (/(members|lvl|member\s*ranks|honor|points|activity)/i.test(line) && r.words.length <= 14) {
       return false;
@@ -359,7 +374,7 @@ function groupIntoRows(words) {
   });
 
   for (const r of out) r.words.sort((a, b) => a.cx - b.cx);
-  return { rows: out, gap };
+  return out;
 }
 
 // Learn column anchors + LEFT bound for Activity (fixes Online being skipped)
@@ -437,9 +452,11 @@ function findHeaderCenters(words, canvasWidth) {
 }
 
 function parseRowsFromWordBoxes(wordBoxes, numericBoxes, canvasWidth) {
-  const grouped = groupIntoRows(wordBoxes);
-  const rows = grouped.rows;
-  const gap = grouped.gap;
+  const rows = groupIntoRows(wordBoxes, canvasWidth);
+  const kept = wordBoxes.filter(w => w && w.text);
+  const heights = kept.map(w => Math.max(1, w.y1 - w.y0)).sort((a, b) => a - b);
+  const medianH = heights.length ? heights[Math.floor(heights.length / 2)] : 18;
+  const gap = Math.max(10, Math.min(40, medianH * 0.9));
   if (!rows.length) return [];
 
   const { lvlCx, honorCx, activityCx, activityLeft } = findHeaderCenters(wordBoxes, canvasWidth);
@@ -724,9 +741,9 @@ extractBtn.addEventListener("click", async () => {
       imageSmoothingQuality: "high",
     });
 
-    // Two preprocesses: binary for general parsing, soft for numeric stability
-    const preText = preprocessCanvasBinary(cropped);
-    const preNum = preprocessCanvasSoft(cropped);
+    // Grayscale + contrast normalization (preserves Online + digits)
+    const preText = preprocessCanvas(cropped);
+    const preNum = preprocessCanvas(cropped);
 
     const data = await doOCR(preText);
     const dataNum = await doOCRNumeric(preNum);
