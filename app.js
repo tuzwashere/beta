@@ -1,7 +1,7 @@
 // OSRP Gang Scanner -> CSV (robust word-box parsing for mobile/desktop)
 // Drop-in app.js
 
-const BUILD = "v11"; // bump when you deploy
+const BUILD = "v12"; // bump when you deploy
 document.title = `OSRP Gang Scanner → CSV (${BUILD})`;
 
 const fileEl = document.getElementById("file");
@@ -70,22 +70,22 @@ function normalizeActivityFromTokens(tokens) {
   const joined = tokens.join(" ").replace(/\s+/g, " ").trim();
   if (!joined) return "n/a";
 
-  // Common Online variants
+  // Direct Online variants first
   if (/\bonline\b/i.test(joined)) return "Online";
-  if (/(^|\s)(on|0n|onl|0nl|onli|0nli|onlin|0nlin)(\s|$)/i.test(joined)) return "Online";
+  if (/(^|\s)(on|0n|onl|0nl|onli|0nli)(\s|$)/i.test(joined)) return "Online";
 
-  // OCR sometimes turns it into letters-only word like SEE / EIT / TERN
-  const alpha = joined.replace(/[^A-Za-z]/g, "");
-  if (alpha.length >= 3 && alpha.length <= 10) return "Online";
-
-  // Fix super common OCR: "Sh." meaning "5h."
+  // Fix super common OCR: "Sh." meaning "5h" (do this BEFORE the letters-only fallback)
   const fixed = joined
     .replace(/\b[Ss]\s*h\.?\b/g, "5h")
     .replace(/\b[Ss]h\.?\b/g, "5h");
 
-  // Time like 7h / 13 h. / 5 m.
+  // Time like 7h / 13 h. / 5 m. / 1 d.
   const m = fixed.match(/\b(\d{1,2})\s*([mhd])\.?\b/i);
   if (m) return `${parseInt(m[1], 10)}${m[2].toLowerCase()}`;
+
+  // Letters-only fallback: OCR often turns Online into "SE", "SEE", "TERN", etc.
+  const alpha = fixed.replace(/[^A-Za-z]/g, "");
+  if (alpha.length >= 2 && alpha.length <= 10) return "Online";
 
   return "n/a";
 }
@@ -426,7 +426,7 @@ function findHeaderCenters(words, canvasWidth) {
       if (/\b\d{1,2}\s*[mhd]\.?\b/i.test(t)) return true;
 
       const alpha = t.replace(/[^A-Za-z]/g, "");
-      if (alpha.length >= 3 && alpha.length <= 10) return true;
+      if (alpha.length >= 2 && alpha.length <= 10) return true;
 
       return false;
     });
