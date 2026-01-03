@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OneState Gang Screenshot → CSV</title>
+  <link
+    rel="stylesheet"
+    href="https://cdn.jsdelivr.net/npm/cropperjs@1.6.2/dist/cropper.min.css"
+  />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="page">
+    <header>
+      <h1>OneState Gang Member OCR → CSV</h1>
+      <p class="subtitle">Convert gang member screenshots into CSV with in-browser OCR.</p>
+    </header>
+
+    <section class="card">
+      <div class="controls">
+        <label class="file-label">
+          Upload screenshot
+          <input id="file-input" type="file" accept="image/*" />
+        </label>
+        <button id="extract-btn" class="primary" disabled>Extract CSV</button>
+        <button id="copy-btn" class="secondary" disabled>Copy</button>
+      </div>
+
+      <div class="status-row">
+        <progress id="ocr-progress" value="0" max="1"></progress>
+        <span id="status-text">Waiting for image…</span>
+      </div>
+
+      <div class="workspace">
+        <div class="preview">
+          <img id="preview-image" alt="Screenshot preview" />
+        </div>
+        <div class="output">
+          <label for="csv-output">CSV output</label>
+          <textarea
+            id="csv-output"
+            rows="14"
+            spellcheck="false"
+          >name,lvl,rank,honor,activity</textarea>
+        </div>
+      </div>
+    </section>
+
+    <section class="card how-to">
+      <h2>How to use</h2>
+      <ol>
+        <li>Upload the screenshot file (avoid Discord compression).</li>
+        <li>Crop to only the table of members.</li>
+        <li>Click <strong>Extract CSV</strong>.</li>
+        <li>Click <strong>Copy</strong>.</li>
+        <li>Paste into Discord command: <code>/import_members data:&lt;paste&gt;</code>.</li>
+      </ol>
+    </section>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/cropperjs@1.6.2/dist/cropper.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
