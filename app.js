@@ -378,13 +378,20 @@ function bboxOf(w) {
 }
 
 function digitsOnly(s) {
-  const digits = String(s || "").replace(/[^\d]/g, "");
-  return digits ? parseInt(digits, 10) : null;
+  s = String(s || "").trim();
+
+  // IMPORTANT: if OCR token contains letters, it's usually icon junk like "x30" or "ty"
+  // Do NOT treat it as a number.
+  if (/[A-Za-z]/.test(s)) return null;
+
+  const d = s.replace(/[^\d]/g, "");
+  return d ? parseInt(d, 10) : null;
 }
 
 function isActivityToken(t) {
   if (!t) return false;
   if (/online/i.test(t)) return true;
+  if (/^(on|0n)$/i.test(t.trim())) return true;
   return /\b\d{1,2}\s*[mhd]\.?\b/i.test(t);
 }
 
@@ -418,7 +425,7 @@ function clusterRows(words) {
 }
 
 function findHeaderCenters(words, canvasWidth) {
-  const topWords = [...words].sort((a, b) => a.cy - b.cy).slice(0, 80);
+  const topWords = [...words].sort((a, b) => a.cy - b.cy).slice(0, 120);
 
   const pick = (regexList) => {
     for (const re of regexList) {
@@ -428,15 +435,47 @@ function findHeaderCenters(words, canvasWidth) {
     return null;
   };
 
-  const lvlCx = pick([/^lvl$/i, /^lv1$/i, /^lv$/i]);
-  const honorCx = pick([
+  // First: try header
+  let lvlCx = pick([/^lvl$/i, /^lv1$/i, /^lv$/i]);
+  let honorCx = pick([
     /^honor$/i,
     /^points$/i,
     /^honorpoints$/i,
     /^honor\s*points$/i,
   ]);
-  const activityCx = pick([/^activity$/i, /^actlity$/i, /^actlvity$/i, /^act$/i]);
+  let activityCx = pick([
+    /^activity$/i,
+    /^actlity$/i,
+    /^actlvity$/i,
+    /^act$/i,
+  ]);
 
+  // Second: refine from actual numeric columns (this is what fixes iPhone drift)
+  const nums = words
+    .map((w) => ({ w, n: digitsOnly(w.text) }))
+    .filter((x) => x.n !== null);
+
+  // LVL candidates: 1–2 digits in the mid-left region (avoid far-left row index)
+  const lvlCandidates = nums
+    .filter((x) => x.n >= 1 && x.n <= 99)
+    .filter((x) => x.w.cx > canvasWidth * 0.25 && x.w.cx < canvasWidth * 0.6);
+
+  if (lvlCandidates.length >= 3) {
+    const xs = lvlCandidates.map((x) => x.w.cx).sort((a, b) => a - b);
+    lvlCx = xs[Math.floor(xs.length / 2)];
+  }
+
+  // HONOR candidates: multi-digit numbers in right side (or zero near right side)
+  const honorCandidates = nums
+    .filter((x) => x.n >= 100 || x.n === 0)
+    .filter((x) => x.w.cx > canvasWidth * 0.62 && x.w.cx < canvasWidth * 0.92);
+
+  if (honorCandidates.length >= 3) {
+    const xs = honorCandidates.map((x) => x.w.cx).sort((a, b) => a - b);
+    honorCx = xs[Math.floor(xs.length / 2)];
+  }
+
+  // Fallbacks if everything fails
   return {
     lvlCx: lvlCx ?? canvasWidth * 0.47,
     honorCx: honorCx ?? canvasWidth * 0.8,
@@ -505,14 +544,28 @@ function parseRowsFromTesseractData(data, canvasWidth) {
     );
     const lvl = lvlCandidates[0].n;
 
-    const honorCandidates = row.words
-      .map((w) => ({ w, n: digitsOnly(w.text) }))
-      .filter((x) => x.n !== null && x.n >= 0);
+    // HONOR = stitch digit chunks near the honor column (e.g., "30" + "050" => 30050)
+    const honorBand = canvasWidth * 0.09;
+    const honorWords = row.words
+      .filter((w) => Math.abs(w.cx - honorCx) <= honorBand)
+      .filter((w) => digitsOnly(w.text) !== null)
+      .sort((a, b) => a.cx - b.cx);
 
-    honorCandidates.sort(
-      (a, b) => Math.abs(a.w.cx - honorCx) - Math.abs(b.w.cx - honorCx)
-    );
-    const honor = honorCandidates.length ? honorCandidates[0].n : 0;
+    let honor = 0;
+    if (honorWords.length) {
+      const stitched = honorWords.map((w) => String(digitsOnly(w.text))).join("");
+      honor = stitched ? parseInt(stitched, 10) : 0;
+    } else {
+      // fallback: nearest numeric token to honorCx (still blocks "x30")
+      const honorCandidates = row.words
+        .map((w) => ({ w, n: digitsOnly(w.text) }))
+        .filter((x) => x.n !== null);
+
+      honorCandidates.sort(
+        (a, b) => Math.abs(a.w.cx - honorCx) - Math.abs(b.w.cx - honorCx)
+      );
+      honor = honorCandidates.length ? honorCandidates[0].n : 0;
+    }
 
     const activityWords = row.words.filter(
       (w) => w.cx > honorCx && isActivityToken(w.text)
