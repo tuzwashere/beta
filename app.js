@@ -360,70 +360,178 @@ function clusterByY(words, yThreshold = 18) {
   return rows;
 }
 
+function bboxOf(w) {
+  const b = w.bbox || w;
+  const x0 = b.x0 ?? b.left ?? 0;
+  const x1 = b.x1 ?? b.right ?? 0;
+  const y0 = b.y0 ?? b.top ?? 0;
+  const y1 = b.y1 ?? b.bottom ?? 0;
+  return {
+    x0,
+    x1,
+    y0,
+    y1,
+    cx: (x0 + x1) / 2,
+    cy: (y0 + y1) / 2,
+    h: Math.max(1, y1 - y0),
+  };
+}
+
+function digitsOnly(s) {
+  const digits = String(s || "").replace(/[^\d]/g, "");
+  return digits ? parseInt(digits, 10) : null;
+}
+
+function isActivityToken(t) {
+  if (!t) return false;
+  if (/online/i.test(t)) return true;
+  return /\b\d{1,2}\s*[mhd]\.?\b/i.test(t);
+}
+
+function extractActivityFromWordObjects(words) {
+  const joined = words.map((w) => w.text).join(" ");
+  if (/\bonline\b/i.test(joined)) return "Online";
+  const match = joined.match(/\b(\d{1,2})\s*([mhd])\.?\b/i);
+  if (!match) return null;
+  return `${parseInt(match[1], 10)}${match[2].toLowerCase()}`;
+}
+
+function clusterRows(words) {
+  const sorted = [...words].sort((a, b) => a.cy - b.cy);
+  const medianH = (() => {
+    const hs = sorted.map((w) => w.h).sort((a, b) => a - b);
+    return hs.length ? hs[Math.floor(hs.length / 2)] : 12;
+  })();
+  const yThresh = Math.max(12, Math.round(medianH * 1.6));
+
+  const rows = [];
+  for (const w of sorted) {
+    const last = rows[rows.length - 1];
+    if (!last || Math.abs(w.cy - last.cy) > yThresh) {
+      rows.push({ cy: w.cy, words: [w] });
+    } else {
+      last.words.push(w);
+      last.cy = (last.cy * (last.words.length - 1) + w.cy) / last.words.length;
+    }
+  }
+  return rows;
+}
+
+function findHeaderCenters(words, canvasWidth) {
+  const topWords = [...words].sort((a, b) => a.cy - b.cy).slice(0, 80);
+
+  const pick = (regexList) => {
+    for (const re of regexList) {
+      const hit = topWords.find((w) => re.test(w.text));
+      if (hit) return hit.cx;
+    }
+    return null;
+  };
+
+  const lvlCx = pick([/^lvl$/i, /^lv1$/i, /^lv$/i]);
+  const honorCx = pick([
+    /^honor$/i,
+    /^points$/i,
+    /^honorpoints$/i,
+    /^honor\s*points$/i,
+  ]);
+  const activityCx = pick([/^activity$/i, /^actlity$/i, /^actlvity$/i, /^act$/i]);
+
+  return {
+    lvlCx: lvlCx ?? canvasWidth * 0.47,
+    honorCx: honorCx ?? canvasWidth * 0.8,
+    activityCx: activityCx ?? canvasWidth * 0.93,
+  };
+}
+
 function parseRowsFromTesseractData(data, canvasWidth) {
-  const words = (data.words || [])
+  const rawWords = data.words || [];
+  if (!rawWords.length) return [];
+
+  const words = rawWords
     .map((w) => {
       const text = (w.text || "").trim();
       if (!text) return null;
-
-      const x0 = w.bbox?.x0 ?? w.bbox?.left ?? 0;
-      const x1 = w.bbox?.x1 ?? w.bbox?.right ?? 0;
-      const y0 = w.bbox?.y0 ?? w.bbox?.top ?? 0;
-      const y1 = w.bbox?.y1 ?? w.bbox?.bottom ?? 0;
-
-      const cx = (x0 + x1) / 2;
-      const cy = (y0 + y1) / 2;
-
-      return { text, cx, cy, x0, x1, y0, y1 };
+      const b = bboxOf(w);
+      return { text, ...b };
     })
     .filter(Boolean);
 
-  if (!words.length) return [];
+  const { lvlCx, honorCx, activityCx } = findHeaderCenters(
+    words,
+    canvasWidth
+  );
 
-  const headerKill = /^(members|lvl|member|ranks|honor|points|activity)$/i;
-  const filtered = words.filter((w) => !headerKill.test(w.text));
+  const headerY = (() => {
+    const headerHits = words
+      .filter((w) =>
+        /^(members|lvl|member|ranks|honor|points|activity)$/i.test(w.text)
+      )
+      .sort((a, b) => a.cy - b.cy);
+    return headerHits.length ? headerHits[0].cy : null;
+  })();
 
-  const col = (cx) => {
-    const r = cx / canvasWidth;
-    if (r < 0.42) return "name";
-    if (r < 0.52) return "lvl";
-    if (r < 0.76) return "rank";
-    if (r < 0.9) return "honor";
-    return "activity";
-  };
+  const medianH = (() => {
+    const hs = words.map((w) => w.h).sort((a, b) => a - b);
+    return hs.length ? hs[Math.floor(hs.length / 2)] : 12;
+  })();
 
-  const tagged = filtered.map((w) => ({
-    ...w,
-    col: col(w.cx),
-    y: w.cy,
-  }));
+  const parseWords =
+    headerY == null
+      ? words
+      : words.filter((w) => w.cy > headerY + medianH * 2.2);
 
-  const rowClusters = clusterByY(tagged, 18);
+  const rowClusters = clusterRows(parseWords);
   const out = [];
 
   for (const row of rowClusters) {
     row.words.sort((a, b) => a.cx - b.cx);
 
-    const buckets = { name: [], lvl: [], rank: [], honor: [], activity: [] };
-    for (const w of row.words) buckets[w.col].push(w.text);
+    const nameWords = row.words.filter(
+      (w) =>
+        w.cx < lvlCx - canvasWidth * 0.02 && /[A-Za-z]/.test(w.text)
+    );
+    const name = normalizeName(nameWords.map((w) => w.text).join(" "));
+    if (!name || name.length < 3) continue;
 
-    const name = normalizeName(buckets.name.join(" "));
-    const lvl = cleanDigits(buckets.lvl.join(" "));
-    const rankRaw = normalizeRankText(buckets.rank.join(" "));
-    const honorParsed = cleanDigits(buckets.honor.join(" "));
+    const lvlCandidates = row.words
+      .map((w) => ({ w, n: digitsOnly(w.text) }))
+      .filter((x) => Number.isFinite(x.n) && x.n >= 1 && x.n <= 99);
 
-    const rowText = row.words.map((w) => w.text).join(" ");
+    if (!lvlCandidates.length) continue;
+
+    lvlCandidates.sort(
+      (a, b) => Math.abs(a.w.cx - lvlCx) - Math.abs(b.w.cx - lvlCx)
+    );
+    const lvl = lvlCandidates[0].n;
+
+    const honorCandidates = row.words
+      .map((w) => ({ w, n: digitsOnly(w.text) }))
+      .filter((x) => x.n !== null && x.n >= 0);
+
+    honorCandidates.sort(
+      (a, b) => Math.abs(a.w.cx - honorCx) - Math.abs(b.w.cx - honorCx)
+    );
+    const honor = honorCandidates.length ? honorCandidates[0].n : 0;
+
+    const activityWords = row.words.filter(
+      (w) => w.cx > honorCx && isActivityToken(w.text)
+    );
     const activity =
-      extractActivityFromText(buckets.activity.join(" ")) ||
-      extractActivityFromText(rowText) ||
+      extractActivityFromWordObjects(activityWords) ||
+      extractActivityFromWordObjects(row.words) ||
       "n/a";
 
-    if (!name || name.length < 3) continue;
-    if (!lvl || lvl < 1 || lvl > 99) continue;
+    const rankWords = row.words.filter(
+      (w) =>
+        w.cx > lvlCx + canvasWidth * 0.01 &&
+        w.cx < honorCx - canvasWidth * 0.01 &&
+        !/^\d+$/.test(w.text) &&
+        !isActivityToken(w.text)
+    );
+    const rank = normalizeRankText(rankWords.map((w) => w.text).join(" "));
 
-    const honor = Number.isFinite(honorParsed) ? honorParsed : 0;
-
-    out.push({ name, lvl, rank: rankRaw, honor, activity });
+    out.push({ name, lvl, rank, honor, activity });
   }
 
   const seen = new Set();
