@@ -39,7 +39,6 @@ function parseRowsFromOcr(rawText) {
       continue;
     }
 
-    // Normalize
     line = line
       .replace(/[“”]/g, '"')
       .replace(/\u00A0/g, " ")
@@ -47,12 +46,7 @@ function parseRowsFromOcr(rawText) {
       .replace(/\s+/g, " ")
       .trim();
 
-    // Must have an activity token
-    const mAct = line.match(/\b(Online|\d+\s*[mhd]\.?)\b/i);
-    if (!mAct) continue;
-    const activity = mAct[1].replace(/\s+/g, "").replace(/\.$/, "");
-
-    // Honor = LAST "big number" group (handles 132 920)
+    // Honor = last big number group (handles "132 920")
     const honorMatches = [...line.matchAll(/\b\d[\d\s]{2,}\b/g)].map(
       (x) => x[0],
     );
@@ -61,42 +55,39 @@ function parseRowsFromOcr(rawText) {
     const honor = parseInt(honorText.replace(/\s+/g, ""), 10);
     if (!Number.isFinite(honor)) continue;
 
-    // Level = first 1–2 digit number (but not from honor)
-    // We'll search before the honor chunk so we don't pick 132 or 920 by mistake.
+    // Activity (can be null; we won't drop the row anymore)
+    const activity = extractActivity(line) || "n/a";
+
+    // Use text before honor to find lvl/name/rank
     const honorIdx = line.lastIndexOf(honorText);
     const beforeHonor = honorIdx > 0 ? line.slice(0, honorIdx).trim() : line;
 
+    // lvl = first 1–2 digit number
     const mLvl = beforeHonor.match(/\b(\d{1,2})\b/);
     if (!mLvl) continue;
     const lvl = parseInt(mLvl[1], 10);
     if (!Number.isFinite(lvl)) continue;
 
-    // Name = text before lvl (strip junk prefixes)
     const lvlIdx = beforeHonor.indexOf(mLvl[1]);
+
+    // name = before lvl (strip junk prefixes like [7], BR, etc)
     let namePart = beforeHonor.slice(0, lvlIdx).trim();
     namePart = namePart
-      .replace(/^[^A-Za-z]+/g, "") // drop junk like "[7]" "BR" "- 8" etc
-      .replace(/\b(BR|es)\b/gi, "") // common OCR junk tokens in your output
+      .replace(/^[^A-Za-z]+/g, "")
+      .replace(/\b(BR|es)\b/gi, "")
       .replace(/\s+/g, " ")
       .trim();
 
     if (namePart.length < 3) continue;
 
-    // Rank = between lvl and honor (remove obvious OCR junk)
+    // rank = between lvl and honor
     let rankPart = beforeHonor.slice(lvlIdx + mLvl[1].length).trim();
-    rankPart = rankPart
-      .replace(/[^\w\s]/g, " ")
-      .replace(/\b[Ss%]\b/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-
-    // If rank is empty, still keep the row (better than dropping it)
-    const rank = rankPart || "";
+    const rank = normalizeRank(rankPart);
 
     rows.push({ name: namePart, lvl, rank, honor, activity });
   }
 
-  // De-dup by name+lvl+honor+activity (OCR sometimes repeats fragments)
+  // De-dup
   const seen = new Set();
   const out = [];
   for (const r of rows) {
@@ -107,6 +98,65 @@ function parseRowsFromOcr(rawText) {
   }
 
   return out;
+}
+
+function titleCase(s) {
+  return (s || "")
+    .toLowerCase()
+    .split(" ")
+    .filter(Boolean)
+    .map((w) => w[0].toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
+function normalizeRank(raw) {
+  if (!raw) return "";
+
+  let cleaned = raw
+    .toUpperCase()
+    .replace(/[^A-Z\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  // ONLY fix super-common OCR glitches (safe)
+  cleaned = cleaned
+    .replace(/\bSOSS\b/g, "BOSS")
+    .replace(/\bPONN?\b/g, "DONN")
+    .replace(/\bOWN\b/g, "DONN");
+
+  // Keep whatever the game rank actually is (no whitelist)
+  return titleCase(cleaned);
+}
+
+function extractActivity(line) {
+  if (/\bonline\b/i.test(line)) return "Online";
+
+  // Try last token like: 1h, 3d, 13m, but allow OCR to misread the number as a letter (T=1, a=3, etc)
+  const m = line.match(/\b([0-9A-Za-z]{1,2})\s*([mhd])\.?\s*$/i);
+  if (!m) return null;
+
+  let num = m[1];
+  const unit = m[2].toLowerCase();
+
+  const map = {
+    a: "3",
+    A: "3",
+    T: "1",
+    I: "1",
+    l: "1",
+    O: "0",
+    o: "0",
+    S: "5",
+    s: "5",
+  };
+  num = num
+    .split("")
+    .map((ch) => (map[ch] ?? ch))
+    .join("");
+
+  if (!/^\d{1,2}$/.test(num)) return null;
+
+  return `${parseInt(num, 10)}${unit}`;
 }
 
 function rowsToCsv(rows) {
