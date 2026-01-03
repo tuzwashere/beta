@@ -1,7 +1,7 @@
 // OSRP Gang Scanner -> CSV (robust word-box parsing for mobile/desktop)
 // Drop-in app.js
 
-const BUILD = "v9"; // bump when you deploy
+const BUILD = "v10"; // bump when you deploy
 document.title = `OSRP Gang Scanner → CSV (${BUILD})`;
 
 const fileEl = document.getElementById("file");
