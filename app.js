@@ -1,7 +1,7 @@
 // OSRP Gang Scanner -> CSV (robust word-box parsing for mobile/desktop)
 // Drop-in app.js
 
-const BUILD = "v13"; // bump when you deploy
+const BUILD = "v14"; // bump when you deploy
 document.title = `OSRP Gang Scanner → CSV (${BUILD})`;
 
 const fileEl = document.getElementById("file");
@@ -492,51 +492,40 @@ function parseRowsFromWordBoxes(wordBoxes, numericBoxes, canvasWidth) {
 
     const lvl = lvlCandidates[0].n;
 
-    // HONOR region: between honor column and activity column
-    const honorLeft = honorCx - canvasWidth * 0.18;
-    const honorRight = activityCx - canvasWidth * 0.14;
+    // HONOR: use a stable % band of the image width (more reliable than honorCx/activityCx)
+    // This band targets the "HONOR POINTS" column regardless of header OCR drift.
+    const honorBandLeft = canvasWidth * 0.62;
+    const honorBandRight = canvasWidth * 0.88;
 
-    // Prefer numeric OCR (fixes 6->8 cases a lot)
-    let honorRaw = honorTokensForRow(row.y, honorLeft, honorRight);
+    const honorTokens = w
+      .filter(x => x.cx >= honorBandLeft && x.cx <= honorBandRight)
+      .map(x => {
+        const d = String(x.text || "").replace(/[^\d]/g, "");
+        return d ? { cx: x.cx, d } : null;
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.cx - b.cx);
 
-    // fallback to main OCR if numeric pass found nothing
-    if (!honorRaw.length) {
-      honorRaw = w
-        .filter(x => x.cx >= honorLeft && x.cx <= honorRight)
-        .map(x => ({ x, n: digitsOnly(x.text) }))
-        .filter(z => z.n !== null)
-        .sort((a, b) => a.x.cx - b.x.cx);
-    }
+    // Build candidates:
+    // - any 3+ digit token is a candidate
+    // - stitch 1–2 digits + next 3+ digits when close (handles "26 200" => 26200, "11 970" => 11970)
+    const honorCandidates = [];
+    for (let i = 0; i < honorTokens.length; i++) {
+      const cur = honorTokens[i].d;
 
-    // Keep only likely honor chunks
-    const parts = [];
-    for (let i = 0; i < honorRaw.length; i++) {
-      const cur = honorRaw[i];
-      const curLen = String(cur.n).length;
+      if (cur.length >= 3) honorCandidates.push(parseInt(cur, 10));
 
-      if (cur.n === 0) { parts.push(cur); continue; }
+      if (cur.length <= 2 && i + 1 < honorTokens.length) {
+        const nxt = honorTokens[i + 1].d;
+        const dx = honorTokens[i + 1].cx - honorTokens[i].cx;
 
-      if (curLen >= 3) { parts.push(cur); continue; }
-
-      const next = honorRaw[i + 1];
-      if (next && String(next.n).length === 3) {
-        if ((next.x.cx - cur.x.cx) <= canvasWidth * 0.08) {
-          parts.push(cur);
+        if (nxt.length >= 3 && dx <= canvasWidth * 0.08) {
+          honorCandidates.push(parseInt(cur + nxt, 10));
         }
       }
     }
 
-    let honor = 0;
-    if (parts.length) {
-      const stitched = parts.map(p => String(p.n)).join("");
-      honor = stitched ? parseInt(stitched, 10) : 0;
-      if (honor > 999999 || honor < 0) {
-        const best = honorRaw.reduce((mx, z) => Math.max(mx, z.n), 0);
-        honor = best || 0;
-      }
-    } else {
-      honor = 0;
-    }
+    let honor = honorCandidates.length ? Math.max(...honorCandidates) : 0;
 
     // Name: everything left of lvl
     const nameWords = w
