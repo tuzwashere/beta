@@ -1,6 +1,9 @@
 // OSRP Gang Scanner -> CSV (robust word-box parsing for mobile/desktop)
 // Drop-in app.js
 
+const BUILD = "v8"; // bump when you deploy
+document.title = `OSRP Gang Scanner → CSV (${BUILD})`;
+
 const fileEl = document.getElementById("file");
 const imgEl = document.getElementById("img");
 const extractBtn = document.getElementById("extract");
@@ -35,7 +38,7 @@ function cleanupImage() {
   clearBtn.disabled = true;
   csvEl.value = "";
   rawEl.value = "";
-  setStatus("Waiting for image…");
+  setStatus(`Waiting for image… (${BUILD})`);
   appendMode = false;
   allRows = [];
   allRawBlocks = [];
