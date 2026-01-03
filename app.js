@@ -197,6 +197,28 @@ function normalizeSpaces(s) {
   return (s || "").replace(/\s+/g, " ").trim();
 }
 
+function cleanDigits(s) {
+  const digits = String(s || "").replace(/[^\d]/g, "");
+  return digits ? parseInt(digits, 10) : null;
+}
+
+function extractActivityFromText(s) {
+  if (!s) return null;
+  if (/\bonline\b/i.test(s)) return "Online";
+
+  const m = String(s).match(/\b(\d{1,2})\s*([mhd])\.?\b/i);
+  if (!m) return null;
+  return `${parseInt(m[1], 10)}${m[2].toLowerCase()}`;
+}
+
+function normalizeName(s) {
+  return String(s || "")
+    .replace(/[“”]/g, '"')
+    .replace(/[^A-Za-z0-9 _'-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function isMostlyLetters(s) {
   return /^[A-Za-z][A-Za-z\s'._-]*$/.test(s);
 }
@@ -319,6 +341,101 @@ function groupWordsIntoRows(words, height) {
   }
 
   return rows;
+}
+
+function clusterByY(words, yThreshold = 18) {
+  const rows = [];
+  const sorted = [...words].sort((a, b) => a.y - b.y);
+
+  for (const w of sorted) {
+    const last = rows[rows.length - 1];
+    if (!last || Math.abs(w.y - last.y) > yThreshold) {
+      rows.push({ y: w.y, words: [w] });
+    } else {
+      last.words.push(w);
+      last.y = (last.y * (last.words.length - 1) + w.y) / last.words.length;
+    }
+  }
+
+  return rows;
+}
+
+function parseRowsFromTesseractData(data, canvasWidth) {
+  const words = (data.words || [])
+    .map((w) => {
+      const text = (w.text || "").trim();
+      if (!text) return null;
+
+      const x0 = w.bbox?.x0 ?? w.bbox?.left ?? 0;
+      const x1 = w.bbox?.x1 ?? w.bbox?.right ?? 0;
+      const y0 = w.bbox?.y0 ?? w.bbox?.top ?? 0;
+      const y1 = w.bbox?.y1 ?? w.bbox?.bottom ?? 0;
+
+      const cx = (x0 + x1) / 2;
+      const cy = (y0 + y1) / 2;
+
+      return { text, cx, cy, x0, x1, y0, y1 };
+    })
+    .filter(Boolean);
+
+  if (!words.length) return [];
+
+  const headerKill = /^(members|lvl|member|ranks|honor|points|activity)$/i;
+  const filtered = words.filter((w) => !headerKill.test(w.text));
+
+  const col = (cx) => {
+    const r = cx / canvasWidth;
+    if (r < 0.42) return "name";
+    if (r < 0.52) return "lvl";
+    if (r < 0.76) return "rank";
+    if (r < 0.9) return "honor";
+    return "activity";
+  };
+
+  const tagged = filtered.map((w) => ({
+    ...w,
+    col: col(w.cx),
+    y: w.cy,
+  }));
+
+  const rowClusters = clusterByY(tagged, 18);
+  const out = [];
+
+  for (const row of rowClusters) {
+    row.words.sort((a, b) => a.cx - b.cx);
+
+    const buckets = { name: [], lvl: [], rank: [], honor: [], activity: [] };
+    for (const w of row.words) buckets[w.col].push(w.text);
+
+    const name = normalizeName(buckets.name.join(" "));
+    const lvl = cleanDigits(buckets.lvl.join(" "));
+    const rankRaw = normalizeRankText(buckets.rank.join(" "));
+    const honorParsed = cleanDigits(buckets.honor.join(" "));
+
+    const rowText = row.words.map((w) => w.text).join(" ");
+    const activity =
+      extractActivityFromText(buckets.activity.join(" ")) ||
+      extractActivityFromText(rowText) ||
+      "n/a";
+
+    if (!name || name.length < 3) continue;
+    if (!lvl || lvl < 1 || lvl > 99) continue;
+
+    const honor = Number.isFinite(honorParsed) ? honorParsed : 0;
+
+    out.push({ name, lvl, rank: rankRaw, honor, activity });
+  }
+
+  const seen = new Set();
+  const deduped = [];
+  for (const r of out) {
+    const k = `${r.name}|${r.lvl}|${r.rank}|${r.honor}|${r.activity}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    deduped.push(r);
+  }
+
+  return deduped;
 }
 
 function parseRowsFromTesseract(data, tableWidth, tableHeight) {
@@ -626,7 +743,7 @@ extractBtn.addEventListener("click", async () => {
     // Always show raw OCR (even if no rows parse)
     rawEl.value = data && data.text ? data.text : "";
 
-    const rows = parseRowsFromTesseract(data, canvas.width, canvas.height);
+    const rows = parseRowsFromTesseractData(data, canvas.width);
     if (!rows.length) {
       csvEl.value = "";
       setStatus("No rows detected. Crop tighter around ONLY the rows and try again.");
