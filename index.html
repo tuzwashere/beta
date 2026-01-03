@@ -29,8 +29,14 @@
           <div class="imgBox">
             <img id="img" alt="preview" />
           </div>
-          <button id="addMore" type="button" disabled>Add another image (append)</button>
           <div id="status" class="status">Waiting for image…</div>
+          <button id="appendImageBtn" type="button" disabled>
+            Add another image (append)
+          </button>
+          <div class="hint" style="margin-top:8px">
+            This keeps your current CSV + Raw OCR and adds the next image’s output.
+            To start over, press <b>Clear</b>.
+          </div>
           <div class="hint">
             Tip: Crop tight around the table. Exclude the left menu and bottom buttons.
           </div>
