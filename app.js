@@ -1,4 +1,5 @@
 // OSRP Gang Scanner -> CSV (robust word-box parsing for mobile/desktop)
+// Drop-in app.js
 
 const fileEl = document.getElementById("file");
 const imgEl = document.getElementById("img");
@@ -17,19 +18,11 @@ const saveRanksBtn = document.getElementById("saveRanks");
 let cropper = null;
 let currentObjectUrl = null;
 
-function setStatus(t) {
-  statusEl.textContent = t;
-}
+function setStatus(t) { statusEl.textContent = t; }
 
 function cleanupImage() {
-  if (cropper) {
-    cropper.destroy();
-    cropper = null;
-  }
-  if (currentObjectUrl) {
-    URL.revokeObjectURL(currentObjectUrl);
-    currentObjectUrl = null;
-  }
+  if (cropper) { cropper.destroy(); cropper = null; }
+  if (currentObjectUrl) { URL.revokeObjectURL(currentObjectUrl); currentObjectUrl = null; }
   imgEl.style.display = "none";
   imgEl.src = "";
   extractBtn.disabled = true;
@@ -53,18 +46,12 @@ function titleCase(s) {
     .join(" ");
 }
 
-function digitsStr(token) {
+// IMPORTANT: blocks junk like "x30" from becoming 30
+function digitsOnly(token) {
   const s = String(token || "").trim();
   if (!s) return null;
-  // reject icon-junk like "x30", "ty", etc
-  if (/[A-Za-z]/.test(s)) return null;
-
+  if (/[A-Za-z]/.test(s)) return null; // reject letter+digit junk
   const d = s.replace(/[^\d]/g, "");
-  return d ? d : null; // IMPORTANT: keep leading zeros
-}
-
-function digitsInt(token) {
-  const d = digitsStr(token);
   return d ? parseInt(d, 10) : null;
 }
 
@@ -72,52 +59,43 @@ function normalizeActivityFromTokens(tokens) {
   const joined = tokens.join(" ").trim();
   if (!joined) return "n/a";
   if (/\bonline\b/i.test(joined)) return "Online";
-  // mobile OCR often truncates online -> "on" or "0n"
-  if (/(^|\s)(on|0n)(\s|$)/i.test(joined)) return "Online";
+  if (/(^|\s)(on|0n)(\s|$)/i.test(joined)) return "Online"; // mobile truncation
 
-  // 1h / 2 h. / 5 m. / 1 d.
   const m = joined.match(/\b(\d{1,2})\s*([mhd])\.?\b/i);
   if (m) return `${parseInt(m[1], 10)}${m[2].toLowerCase()}`;
   return "n/a";
 }
 
 function cleanName(words) {
-  const cleaned = (words || [])
-    .map((t) => String(t || "").trim())
-    .filter(Boolean)
-    // drop row index tokens like: "1", "1)", "1.", "1-", "1:"
-    .filter((t) => !/^\d+[)\].:,-]?$/.test(t))
-    // drop pure bullet / junk tokens
-    .filter((t) => !/^[=•\-\u2022]+$/.test(t))
-    // strip leading bullet-ish prefixes from remaining tokens
-    .map((t) => t.replace(/^[=•\-\u2022]+/g, "").trim())
-    .filter(Boolean);
-
-  return cleaned
-    .join(" ")
+  const s = words.join(" ")
     .replace(/[“”]/g, '"')
     .replace(/\u00A0/g, " ")
     .replace(/[|]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+
+  return s.replace(/^[^\w]+/g, "").replace(/^\d+\s+/, "").trim();
 }
 
+// PATCH: drop 1–2 letter junk like Ey/Wy/NF + fix Donn/Boss OCR typos
 function cleanRank(words) {
-  const s = words
-    .join(" ")
+  const s = words.join(" ")
     .replace(/[“”]/g, '"')
     .replace(/\u00A0/g, " ")
     .replace(/[|]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 
-  // Keep letters/spaces only
-  let cleaned = s.toUpperCase().replace(/[^A-Z\s]/g, " ").replace(/\s+/g, " ").trim();
+  let cleaned = s
+    .toUpperCase()
+    .replace(/[^A-Z\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 
-  // Drop 1–2 letter junk tokens (badge/icon noise like "EY", "WY", "NF", "NL", etc)
+  // Drop 1–2 letter junk tokens (badge/icon noise like EY, WY, NF, NL, etc)
   cleaned = cleaned
     .split(" ")
-    .filter((t) => t.length >= 3)
+    .filter(t => t.length >= 3)
     .join(" ")
     .trim();
 
@@ -141,12 +119,10 @@ function rowsToCsv(rows) {
   return lines.join("\n");
 }
 
-// Simple Levenshtein for rank matching (optional)
+// Simple Levenshtein for rank matching
 function levenshtein(a, b) {
-  a = a || "";
-  b = b || "";
-  const m = a.length;
-  const n = b.length;
+  a = (a || ""); b = (b || "");
+  const m = a.length, n = b.length;
   if (!m) return n;
   if (!n) return m;
   const dp = new Array(n + 1);
@@ -168,20 +144,12 @@ function bestRankMatch(rankText, rankList) {
   const raw = (rankText || "").trim();
   if (!raw || !rankList?.length) return raw;
 
-  const norm = (s) => s.toLowerCase().replace(/[^a-z]/g, "");
-  const a = norm(raw);
-
-  // 1) Substring match first (handles "Ey Gang Leader R")
-  for (const r of rankList) {
-    const b = norm(r);
-    if (b && a.includes(b)) return r;
-  }
-
+  const a = raw.toLowerCase().replace(/\s+/g, "");
   let best = null;
   let bestScore = Infinity;
 
   for (const r of rankList) {
-    const b = norm(r);
+    const b = r.toLowerCase().replace(/\s+/g, "");
     if (!b) continue;
     const d = levenshtein(a, b);
     if (d < bestScore) {
@@ -190,40 +158,23 @@ function bestRankMatch(rankText, rankList) {
     }
   }
 
-  // Only snap if it’s reasonably close
-  return best && bestScore <= 3 ? best : raw;
-}
-
-function detectRankFromRow(rowWords, rankList) {
-  if (!rankList?.length) return "";
-
-  const rowText = rowWords
-    .map((w) => String(w.text || ""))
-    .join(" ")
-    .toLowerCase();
-
-  for (const r of rankList) {
-    const rr = String(r || "").trim();
-    if (!rr) continue;
-    if (rowText.includes(rr.toLowerCase())) return rr;
-  }
-  return "";
+  // Snap only if reasonably close
+  if (best && bestScore <= 3) return best;
+  return raw;
 }
 
 function getRankList() {
   if (!ranksEl) return [];
-  const lines = (ranksEl.value || "")
+  return (ranksEl.value || "")
     .split(/\r?\n/)
-    .map((s) => s.trim())
+    .map(s => s.trim())
     .filter(Boolean);
-  return lines;
 }
 
 // ---------------------------
 // Preprocess (helps iPhone a lot)
 // ---------------------------
 function preprocessCanvas(srcCanvas) {
-  // Upscale + threshold in JS (cheap but effective for this UI)
   const scale = 2.5;
   const w = Math.max(1, Math.floor(srcCanvas.width * scale));
   const h = Math.max(1, Math.floor(srcCanvas.height * scale));
@@ -233,29 +184,23 @@ function preprocessCanvas(srcCanvas) {
   out.height = h;
 
   const ctx = out.getContext("2d", { willReadFrequently: true });
-
-  // Upscale
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = "high";
   ctx.drawImage(srcCanvas, 0, 0, w, h);
 
-  // Threshold
   const img = ctx.getImageData(0, 0, w, h);
   const data = img.data;
 
-  // Compute mean luminance
   let sum = 0;
   for (let i = 0; i < data.length; i += 4) {
-    const y = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+    const y = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114);
     sum += y;
   }
   const mean = sum / (data.length / 4);
-
-  // Push contrast: make text darker
   const thr = Math.min(215, Math.max(140, mean - 10));
 
   for (let i = 0; i < data.length; i += 4) {
-    const y = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+    const y = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114);
     const v = y > thr ? 255 : 0;
     data[i] = data[i + 1] = data[i + 2] = v;
     data[i + 3] = 255;
@@ -280,19 +225,15 @@ function normalizeWord(w) {
   const cx = (x0 + x1) / 2;
   const cy = (y0 + y1) / 2;
 
-  const conf = typeof w.confidence === "number" ? w.confidence : 100;
+  const conf = (typeof w.confidence === "number") ? w.confidence : 100;
   return { text, x0, x1, y0, y1, cx, cy, conf };
 }
 
-function groupIntoRows(words, canvasHeight) {
-  // Keep decent-confidence words; icons/junk are often low confidence
-  const ws = words.filter((w) => w && w.text && w.conf >= 25);
-
-  // Sort by Y
+function groupIntoRows(words) {
+  const ws = words.filter(w => w && w.text && w.conf >= 25);
   ws.sort((a, b) => a.cy - b.cy);
 
-  // Estimate row gap from median word height
-  const heights = ws.map((w) => Math.max(1, w.y1 - w.y0)).sort((a, b) => a - b);
+  const heights = ws.map(w => Math.max(1, w.y1 - w.y0)).sort((a, b) => a - b);
   const medianH = heights.length ? heights[Math.floor(heights.length / 2)] : 18;
   const gap = Math.max(10, Math.min(40, medianH * 0.9));
 
@@ -305,20 +246,16 @@ function groupIntoRows(words, canvasHeight) {
     }
     if (Math.abs(w.cy - last.y) <= gap) {
       last.words.push(w);
-      // update row center
       last.y = (last.y * (last.words.length - 1) + w.cy) / last.words.length;
     } else {
       rows.push({ y: w.cy, words: [w] });
     }
   }
 
-  // Merge tiny rows into nearest (sometimes iPhone makes split row fragments)
+  // Merge tiny rows into nearest
   const merged = [];
   for (const r of rows) {
-    if (!merged.length) {
-      merged.push(r);
-      continue;
-    }
+    if (!merged.length) { merged.push(r); continue; }
     const prev = merged[merged.length - 1];
     if (r.words.length <= 2 && Math.abs(r.y - prev.y) <= gap * 1.2) {
       prev.words.push(...r.words);
@@ -329,29 +266,25 @@ function groupIntoRows(words, canvasHeight) {
   }
 
   // Remove obvious header row(s)
-  const out = merged.filter((r) => {
-    const line = r.words.map((w) => w.text).join(" ").toLowerCase();
-    if (
-      /(members|lvl|member\s*ranks|honor|points|activity)/i.test(line) &&
-      r.words.length <= 12
-    ) {
+  const out = merged.filter(r => {
+    const line = r.words.map(w => w.text).join(" ").toLowerCase();
+    if (/(members|lvl|member\s*ranks|honor|points|activity)/i.test(line) && r.words.length <= 14) {
       return false;
     }
     return true;
   });
 
-  // Clean/sort row words by X
   for (const r of out) r.words.sort((a, b) => a.cx - b.cx);
-
   return out;
 }
 
+// PATCH: learn Activity column like LVL/HONOR
 function findHeaderCenters(words, canvasWidth) {
   const topWords = [...words].sort((a, b) => a.cy - b.cy).slice(0, 160);
 
   const pick = (regexList) => {
     for (const re of regexList) {
-      const hit = topWords.find((w) => re.test(w.text));
+      const hit = topWords.find(w => re.test(w.text));
       if (hit) return hit.cx;
     }
     return null;
@@ -362,155 +295,113 @@ function findHeaderCenters(words, canvasWidth) {
   let activityCx = pick([/^activity$/i, /^actlity$/i, /^actlvity$/i, /^act$/i]);
 
   const nums = words
-    .map((w) => ({ w, n: digitsInt(w.text) }))
-    .filter((x) => x.n !== null);
+    .map(w => ({ w, n: digitsOnly(w.text) }))
+    .filter(x => x.n !== null);
 
-  // Learn LVL from 1–2 digit column
   const lvlCandidates = nums
-    .filter((x) => x.n >= 1 && x.n <= 99)
-    .filter((x) => x.w.cx > canvasWidth * 0.25 && x.w.cx < canvasWidth * 0.6);
+    .filter(x => x.n >= 1 && x.n <= 99)
+    .filter(x => x.w.cx > canvasWidth * 0.25 && x.w.cx < canvasWidth * 0.60);
 
   if (lvlCandidates.length >= 4) {
-    const xs = lvlCandidates.map((x) => x.w.cx).sort((a, b) => a - b);
+    const xs = lvlCandidates.map(x => x.w.cx).sort((a, b) => a - b);
     lvlCx = xs[Math.floor(xs.length / 2)];
   }
 
-  // Learn HONOR from right-side numbers (including 0)
   const honorCandidates = nums
-    .filter((x) => x.n >= 100 || x.n === 0)
-    .filter((x) => x.w.cx > canvasWidth * 0.6 && x.w.cx < canvasWidth * 0.92);
+    .filter(x => (x.n >= 100) || x.n === 0)
+    .filter(x => x.w.cx > canvasWidth * 0.60 && x.w.cx < canvasWidth * 0.92);
 
   if (honorCandidates.length >= 4) {
-    const xs = honorCandidates.map((x) => x.w.cx).sort((a, b) => a - b);
+    const xs = honorCandidates.map(x => x.w.cx).sort((a, b) => a - b);
     honorCx = xs[Math.floor(xs.length / 2)];
   }
 
-  // Learn ACTIVITY from tokens like Online / on / 0n / "7 h." / "4 d."
   const activityCandidates = words
-    .filter(
-      (w) =>
-        /\bonline\b/i.test(w.text) ||
-        /^(on|0n)$/i.test(w.text.trim()) ||
-        /\b\d{1,2}\s*[mhd]\.?\b/i.test(w.text),
+    .filter(w =>
+      /\bonline\b/i.test(w.text) ||
+      /^(on|0n)$/i.test(w.text.trim()) ||
+      /\b\d{1,2}\s*[mhd]\.?\b/i.test(w.text)
     )
-    .filter((w) => w.cx > canvasWidth * 0.7);
+    .filter(w => w.cx > canvasWidth * 0.70);
 
   if (activityCandidates.length >= 3) {
-    const xs = activityCandidates.map((w) => w.cx).sort((a, b) => a - b);
+    const xs = activityCandidates.map(w => w.cx).sort((a, b) => a - b);
     activityCx = xs[Math.floor(xs.length / 2)];
   }
 
   return {
     lvlCx: lvlCx ?? canvasWidth * 0.47,
-    honorCx: honorCx ?? canvasWidth * 0.8,
+    honorCx: honorCx ?? canvasWidth * 0.80,
     activityCx: activityCx ?? canvasWidth * 0.93,
   };
 }
 
-function parseRowsFromWordBoxes(wordBoxes, canvasWidth, canvasHeight) {
-  const rows = groupIntoRows(wordBoxes, canvasHeight);
+function parseRowsFromWordBoxes(wordBoxes, canvasWidth) {
+  const rows = groupIntoRows(wordBoxes);
   if (!rows.length) return [];
-  const { lvlCx, honorCx } = findHeaderCenters(wordBoxes, canvasWidth);
 
-  // Fixed column bands (fractions of width) — stable across iPhone/desktop
-  const COL = {
-    name: [0.0, 0.36],
-    lvl: [0.36, 0.46],
-    rank: [0.46, 0.72],
-    honor: [0.72, 0.88],
-    act: [0.88, 1.0],
-  };
-
+  const { lvlCx, honorCx, activityCx } = findHeaderCenters(wordBoxes, canvasWidth);
   const rankList = getRankList();
+
   const out = [];
 
-  const inBand = (w, a, b) => w.cx >= canvasWidth * a && w.cx < canvasWidth * b;
+  for (const row of rows) {
+    const w = row.words;
 
-  // Stitch numbers inside a band left->right: "30" + "050" => 30050
-  function stitchNumber(wordsInBand) {
-    const parts = wordsInBand
-      .map((w) => ({ w, d: digitsStr(w.text) }))
-      .filter((x) => x.d !== null)
-      .sort((a, b) => a.w.cx - b.w.cx);
+    // LVL: nearest 1–99 digit token to lvlCx (prefer tokens near the lvl column)
+    const lvlBand = canvasWidth * 0.06;
+    const lvlCand = w
+      .map(x => ({ x, n: digitsOnly(x.text) }))
+      .filter(z => z.n !== null && z.n >= 1 && z.n <= 99)
+      .filter(z => Math.abs(z.x.cx - lvlCx) <= lvlBand || z.x.cx < honorCx) // keep sane region
+      .sort((a, b) => Math.abs(a.x.cx - lvlCx) - Math.abs(b.x.cx - lvlCx));
 
-    if (!parts.length) return null;
+    const lvl = lvlCand.length ? lvlCand[0].n : null;
+    if (lvl === null) continue;
 
-    const stitched = parts.map((x) => x.d).join("");
-    return stitched ? parseInt(stitched, 10) : null;
-  }
+    // HONOR: stitch digit chunks near honorCx (e.g., "30" + "050" => 30050)
+    const honorBand = canvasWidth * 0.09;
+    const honorWords = w
+      .filter(x => Math.abs(x.cx - honorCx) <= honorBand)
+      .map(x => ({ x, n: digitsOnly(x.text) }))
+      .filter(z => z.n !== null)
+      .sort((a, b) => a.x.cx - b.x.cx);
 
-  function parseLvl(wordsInBand) {
-    const parts = wordsInBand
-      .map((w) => ({ w, d: digitsStr(w.text) }))
-      .filter((x) => x.d !== null)
-      .sort((a, b) => a.w.cx - b.w.cx);
-
-    if (!parts.length) return null;
-
-    // Stitch if it looks like split digits (e.g., "1" + "8")
-    if (parts.length >= 2) {
-      const stitched = parts.map((x) => x.d).join("");
-      const v = stitched ? parseInt(stitched, 10) : null;
-      if (v !== null && v >= 0 && v <= 99) return v;
+    let honor = 0;
+    if (honorWords.length) {
+      const stitched = honorWords.map(z => String(z.n)).join("");
+      honor = stitched ? parseInt(stitched, 10) : 0;
+    } else {
+      const fallback = w
+        .map(x => ({ x, n: digitsOnly(x.text) }))
+        .filter(z => z.n !== null)
+        .sort((a, b) => Math.abs(a.x.cx - honorCx) - Math.abs(b.x.cx - honorCx));
+      honor = fallback.length ? fallback[0].n : 0;
     }
 
-    const v = parseInt(parts[0].d, 10);
-    return v >= 0 && v <= 99 ? v : null;
-  }
-
-  function normalizeOnline(tokens) {
-    const s = tokens.join(" ").trim();
-    if (!s) return "n/a";
-
-    // iPhone gives junk like "Onlir", "Onl", "0n"
-    if (/\bonl/i.test(s) || /(^|\s)(on|0n)(\s|$)/i.test(s)) return "Online";
-
-    const m = s.match(/\b(\d{1,2})\s*([mhd])\.?\b/i);
-    if (m) return `${parseInt(m[1], 10)}${m[2].toLowerCase()}`;
-
-    return "n/a";
-  }
-
-  for (const row of rows) {
-    const w = row.words.slice().sort((a, b) => a.cx - b.cx);
-
-    const nameWords = w.filter((x) => inBand(x, ...COL.name)).map((x) => x.text);
-    const lvlBand = canvasWidth * 0.045;
-    const lvlWords = w.filter((x) => Math.abs(x.cx - lvlCx) <= lvlBand);
-    const honorWords = w.filter((x) => inBand(x, ...COL.honor));
-    const actTokens = w.filter((x) => inBand(x, ...COL.act)).map((x) => x.text);
+    // Name: everything clearly left of lvl column
+    const nameWords = w
+      .filter(x => x.cx < (lvlCx - canvasWidth * 0.06))
+      .map(x => x.text);
 
     const name = cleanName(nameWords);
     if (!name || name.length < 2) continue;
 
-    let lvl = parseLvl(lvlWords);
-    if (lvl === null) {
-      const fb = w
-        .map((x) => ({ x, n: digitsInt(x.text) }))
-        .filter((z) => z.n !== null && z.n >= 0 && z.n <= 99)
-        .sort((a, b) => Math.abs(a.x.cx - lvlCx) - Math.abs(b.x.cx - lvlCx));
-      lvl = fb.length ? fb[0].n : null;
-    }
-    if (lvl === null) continue;
-
-    // HONOR: stitch if present; if OCR missed it (common for zeros) => HONOR = 0
-    const honorVal = stitchNumber(honorWords);
-    const honor = honorVal === null ? 0 : honorVal;
-
-    // Rank
+    // Rank: between lvl and honor, only letter-ish tokens
     const rankWords = w
-      .filter((x) => x.cx > lvlCx + canvasWidth * 0.02 && x.cx < honorCx - canvasWidth * 0.04)
-      .filter((x) => /[A-Za-z]/.test(x.text))
-      .map((x) => x.text);
+      .filter(x => x.cx > (lvlCx + canvasWidth * 0.03) && x.cx < (honorCx - canvasWidth * 0.06))
+      .filter(x => /[A-Za-z]/.test(x.text))
+      .map(x => x.text);
+
     let rank = cleanRank(rankWords);
     rank = bestRankMatch(rank, rankList);
-    if (!rank) {
-      const r2 = detectRankFromRow(w, rankList);
-      rank = r2 || "";
-    }
 
-    // Activity
-    const activity = normalizeOnline(actTokens);
+    // Activity: far-right tokens
+    const activityTokens = w
+      .filter(x => x.cx > (activityCx - canvasWidth * 0.12))
+      .map(x => x.text);
+
+    const activity = normalizeActivityFromTokens(activityTokens);
 
     out.push({ name, lvl, rank: rank || "", honor, activity });
   }
@@ -545,11 +436,12 @@ async function doOCR(canvas) {
 }
 
 // ---------------------------
-// Optional ranks persistence
+// Ranks persistence
 // ---------------------------
 function loadRanks() {
   if (!ranksEl) return;
   const saved = localStorage.getItem("osrp_ranks") || "";
+
   const defaults = [
     "Gang Leader",
     "Deputy",
@@ -568,13 +460,45 @@ function loadRanks() {
     ranksEl.value = defaults;
   }
 }
+
 function saveRanks() {
   if (!ranksEl) return;
   localStorage.setItem("osrp_ranks", (ranksEl.value || "").trim());
   setStatus("Ranks saved.");
 }
+
 if (saveRanksBtn) saveRanksBtn.addEventListener("click", saveRanks);
 loadRanks();
+
+// ---------------------------
+// CSV download
+// ---------------------------
+function downloadCsv(filename, csvText) {
+  const blob = new Blob([csvText], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+
+  URL.revokeObjectURL(url);
+}
+
+downloadBtn?.addEventListener("click", () => {
+  const csv = (csvEl.value || "").trim();
+  if (!csv) {
+    alert("No CSV to download.");
+    return;
+  }
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  downloadCsv(`members_${yyyy}-${mm}-${dd}.csv`, csv);
+});
 
 // ---------------------------
 // UI wiring
@@ -583,10 +507,7 @@ fileEl.addEventListener("change", () => {
   const f = fileEl.files && fileEl.files[0];
   if (!f) return;
 
-  if (cropper) {
-    cropper.destroy();
-    cropper = null;
-  }
+  if (cropper) { cropper.destroy(); cropper = null; }
   if (currentObjectUrl) URL.revokeObjectURL(currentObjectUrl);
 
   currentObjectUrl = URL.createObjectURL(f);
@@ -634,15 +555,16 @@ extractBtn.addEventListener("click", async () => {
 
     rawEl.value = data.text || "";
 
-    // IMPORTANT: use data.words (with bbox) instead of plain text parsing
-    const wordBoxes = (data.words || []).map(normalizeWord).filter(Boolean);
+    const wordBoxes = (data.words || [])
+      .map(normalizeWord)
+      .filter(Boolean);
 
     if (!wordBoxes.length) {
       setStatus("No OCR words found. Try a clearer screenshot.");
       return;
     }
 
-    const rows = parseRowsFromWordBoxes(wordBoxes, pre.width, pre.height);
+    const rows = parseRowsFromWordBoxes(wordBoxes, pre.width);
     if (!rows.length) {
       setStatus("No rows detected. Crop tighter around ONLY the rows and try again.");
       return;
