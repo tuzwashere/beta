@@ -1,7 +1,8 @@
 const fileEl = document.getElementById("file");
 const imgEl = document.getElementById("img");
 const extractBtn = document.getElementById("extract");
-const copyBtn = document.getElementById("copy");
+const copyBtn = document.getElementById("copyCsvBtn");
+const downloadBtn = document.getElementById("downloadCsvBtn");
 const clearBtn = document.getElementById("clear");
 const csvEl = document.getElementById("csv");
 const rawEl = document.getElementById("raw");
@@ -19,6 +20,7 @@ function cleanupImage() {
   imgEl.src = "";
   extractBtn.disabled = true;
   copyBtn.disabled = true;
+  downloadBtn.disabled = true;
   clearBtn.disabled = true;
   csvEl.value = "";
   rawEl.value = "";
@@ -209,6 +211,7 @@ fileEl.addEventListener("change", () => {
     extractBtn.disabled = false;
     clearBtn.disabled = false;
     copyBtn.disabled = true;
+    downloadBtn.disabled = true;
     csvEl.value = "";
     rawEl.value = "";
   };
@@ -219,6 +222,7 @@ extractBtn.addEventListener("click", async () => {
 
   extractBtn.disabled = true;
   copyBtn.disabled = true;
+  downloadBtn.disabled = true;
 
   try {
     setStatus("Preparing crop…");
@@ -240,6 +244,7 @@ extractBtn.addEventListener("click", async () => {
     csvEl.value = rowsToCsv(rows);
     setStatus(`Extracted ${rows.length} row(s). Review CSV then Copy.`);
     copyBtn.disabled = false;
+    downloadBtn.disabled = false;
   } catch (e) {
     console.error(e);
     setStatus("OCR failed. Try cropping tighter or use a clearer screenshot.");
@@ -249,7 +254,7 @@ extractBtn.addEventListener("click", async () => {
 });
 
 copyBtn.addEventListener("click", async () => {
-  const text = csvEl.value.trim();
+  const text = buildCsvText().trim();
   if (!text) return;
   await navigator.clipboard.writeText(text);
   setStatus("CSV copied to clipboard.");
