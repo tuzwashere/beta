@@ -66,6 +66,27 @@ function digitsOnly(token) {
   return d ? parseInt(d, 10) : null;
 }
 
+function lvlValue(token) {
+  const t = String(token || "").trim();
+  if (!t) return null;
+
+  // normal digits
+  const n = digitsOnly(t);
+  if (n !== null) return n;
+
+  const s = t.replace(/\s+/g, "");
+
+  // OCR turns "11" into these a lot
+  if (/^(n|N)$/.test(s)) return 11;
+  if (/^(ll|LL|ii|II|\|\|)$/.test(s)) return 11;
+  if (/^(lI|Il|I1|1I)$/i.test(s)) return 11;
+
+  // sometimes 10 becomes "lo"/"io"
+  if (/^(lo|io|l0|i0)$/i.test(s)) return 10;
+
+  return null;
+}
+
 function normalizeActivityFromTokens(tokens) {
   const joined = tokens.join(" ").replace(/\s+/g, " ").trim();
   if (!joined) return "n/a";
@@ -359,7 +380,7 @@ function findHeaderCenters(words, canvasWidth) {
   let activityCx = pick([/^activity$/i, /^actlity$/i, /^actlvity$/i, /^act$/i]);
 
   const nums = words
-    .map(w => ({ w, n: digitsOnly(w.text) }))
+    .map(w => ({ w, n: lvlValue(w.text) }))
     .filter(x => x.n !== null);
 
   const lvlCandidates = nums
@@ -424,7 +445,7 @@ function parseRowsFromWordBoxes(wordBoxes, canvasWidth) {
     // LVL: choose best numeric token near lvlCx (distance + confidence weighted)
     const lvlBand = canvasWidth * 0.08;
     const lvlCandidates = w
-      .map(x => ({ x, n: digitsOnly(x.text) }))
+      .map(x => ({ x, n: lvlValue(x.text) }))
       .filter(z => z.n !== null && z.n >= 1 && z.n <= 99)
       .filter(z => Math.abs(z.x.cx - lvlCx) <= lvlBand);
 
