@@ -10,6 +10,7 @@ const clearBtn = document.getElementById("clear");
 const csvEl = document.getElementById("csv");
 const rawEl = document.getElementById("raw");
 const statusEl = document.getElementById("status");
+const addMoreBtn = document.getElementById("addMore");
 
 // Optional ranks UI (if present in your HTML)
 const ranksEl = document.getElementById("ranks") || document.getElementById("gangRanks");
@@ -17,6 +18,8 @@ const saveRanksBtn = document.getElementById("saveRanks");
 
 let cropper = null;
 let currentObjectUrl = null;
+let accumulatedRows = [];
+let accumulatedRawChunks = [];
 
 function setStatus(t) { statusEl.textContent = t; }
 
@@ -32,11 +35,43 @@ function cleanupImage() {
   csvEl.value = "";
   rawEl.value = "";
   setStatus("Waiting for image…");
+  accumulatedRows = [];
+  accumulatedRawChunks = [];
+  if (addMoreBtn) addMoreBtn.disabled = true;
 }
 
 // ---------------------------
 // Helpers
 // ---------------------------
+function rowKey(r) {
+  const name = (r.name || "").trim().toLowerCase();
+  const lvl = Number(r.lvl || 0);
+  const honor = Number(r.honor || 0);
+  return `${name}|${lvl}|${honor}`;
+}
+
+function mergeAppendRows(existing, incoming) {
+  const map = new Map();
+  for (const r of existing) map.set(rowKey(r), r);
+
+  for (const r of incoming) {
+    const k = rowKey(r);
+    if (!map.has(k)) {
+      map.set(k, r);
+    } else {
+      const prev = map.get(k);
+      if ((!prev.rank || prev.rank.length < 3) && (r.rank && r.rank.length >= 3)) {
+        map.set(k, { ...prev, rank: r.rank });
+      }
+      if ((prev.activity === "n/a") && (r.activity && r.activity !== "n/a")) {
+        map.set(k, { ...prev, activity: r.activity });
+      }
+    }
+  }
+
+  return Array.from(map.values());
+}
+
 function titleCase(s) {
   return (s || "")
     .toLowerCase()
@@ -558,10 +593,16 @@ fileEl.addEventListener("change", () => {
     clearBtn.disabled = false;
     copyBtn.disabled = true;
     downloadBtn.disabled = true;
-    csvEl.value = "";
-    rawEl.value = "";
+    if (addMoreBtn) addMoreBtn.disabled = false;
   };
 });
+
+if (addMoreBtn) {
+  addMoreBtn.addEventListener("click", () => {
+    fileEl.value = "";
+    fileEl.click();
+  });
+}
 
 extractBtn.addEventListener("click", async () => {
   if (!cropper) return;
@@ -580,8 +621,6 @@ extractBtn.addEventListener("click", async () => {
     const pre = preprocessCanvas(cropped);
     const data = await doOCR(pre);
 
-    rawEl.value = data.text || "";
-
     const wordBoxes = (data.words || [])
       .map(normalizeWord)
       .filter(Boolean);
@@ -597,8 +636,15 @@ extractBtn.addEventListener("click", async () => {
       return;
     }
 
-    csvEl.value = rowsToCsv(rows);
-    setStatus(`Extracted ${rows.length} row(s). Review CSV then Copy/Download.`);
+    const rawChunk = (data.text || "").trim();
+    if (rawChunk) {
+      accumulatedRawChunks.push(rawChunk);
+      rawEl.value = accumulatedRawChunks.join("\n\n---\n\n");
+    }
+
+    accumulatedRows = mergeAppendRows(accumulatedRows, rows);
+    csvEl.value = rowsToCsv(accumulatedRows);
+    setStatus(`Added ${rows.length} row(s). Total now: ${accumulatedRows.length}.`);
     copyBtn.disabled = false;
     downloadBtn.disabled = false;
   } catch (e) {
