@@ -276,18 +276,37 @@ function preprocessCanvas(srcCanvas) {
   const img = ctx.getImageData(0, 0, w, h);
   const data = img.data;
 
-  let sum = 0;
-  for (let i = 0; i < data.length; i += 4) {
-    const y = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114);
-    sum += y;
+  const sample = [];
+  const step = Math.max(1, Math.floor((w * h) / 12000));
+  for (let p = 0; p < data.length; p += 4 * step) {
+    const r = data[p];
+    const g = data[p + 1];
+    const b = data[p + 2];
+    const y = (r * 0.299 + g * 0.587 + b * 0.114);
+    sample.push(y);
   }
-  const mean = sum / (data.length / 4);
-  const thr = Math.min(225, Math.max(125, mean - 25));
+  sample.sort((a, b) => a - b);
+
+  const p05 = sample[Math.floor(sample.length * 0.05)] ?? 0;
+  const p95 = sample[Math.floor(sample.length * 0.95)] ?? 255;
+  const range = Math.max(1, p95 - p05);
+
+  const gamma = 0.9;
 
   for (let i = 0; i < data.length; i += 4) {
-    const y = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114);
-    const v = y > thr ? 255 : 0;
-    data[i] = data[i + 1] = data[i + 2] = v;
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    let y = (r * 0.299 + g * 0.587 + b * 0.114);
+
+    y = (y - p05) / range;
+    y = Math.max(0, Math.min(1, y));
+    y = Math.pow(y, gamma);
+
+    const v = Math.round(y * 255);
+    data[i] = v;
+    data[i + 1] = v;
+    data[i + 2] = v;
     data[i + 3] = 255;
   }
 
