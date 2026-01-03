@@ -72,6 +72,71 @@ function cleanupImage() {
   setStatus("Waiting for image…");
 }
 
+function getRankHints() {
+  const el =
+    document.getElementById("rankHints") ||
+    document.getElementById("gangRanks") ||
+    document.getElementById("ranks") ||
+    document.getElementById("rankList");
+
+  const raw = el ? el.value : "";
+  return raw
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function normLetters(s) {
+  return (s || "")
+    .toLowerCase()
+    .replace(/[^a-z\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function rankSimilarity(a, b) {
+  const A = new Set(normLetters(a).split(" ").filter(Boolean));
+  const B = new Set(normLetters(b).split(" ").filter(Boolean));
+  if (!A.size || !B.size) return 0;
+  let common = 0;
+  for (const t of A) {
+    if (B.has(t)) common++;
+  }
+  return common / Math.max(A.size, B.size);
+}
+
+function pickClosestRank(raw, hints) {
+  if (!hints || !hints.length) return raw;
+
+  let best = raw;
+  let bestScore = 0;
+
+  for (const h of hints) {
+    const score = rankSimilarity(raw, h);
+    if (score > bestScore) {
+      bestScore = score;
+      best = h;
+    }
+  }
+
+  return bestScore >= 0.5 ? best : raw;
+}
+
+function extractActivity(line) {
+  if (!line) return null;
+  if (/\bonline\b/i.test(line)) return "Online";
+
+  const matches = [...line.matchAll(/\b(\d{1,2})\s*([mhd])\.?\b/gi)];
+  if (!matches.length) return null;
+
+  const m = matches[matches.length - 1];
+  const num = parseInt(m[1], 10);
+  const unit = (m[2] || "").toLowerCase();
+  if (!Number.isFinite(num)) return null;
+
+  return `${num}${unit}`;
+}
+
 function titleCase(s) {
   return (s || "")
     .toLowerCase()
@@ -81,125 +146,29 @@ function titleCase(s) {
     .join(" ");
 }
 
-function normalizeLettersOnly(s) {
-  return (s || "").toUpperCase().replace(/[^A-Z]/g, "");
-}
+function normalizeRank(raw, hints) {
+  if (!raw) return "";
 
-// Simple Levenshtein distance (small strings only)
-function levenshtein(a, b) {
-  a = a || "";
-  b = b || "";
-  const n = a.length;
-  const m = b.length;
-  if (!n) return m;
-  if (!m) return n;
-
-  const dp = new Array(m + 1);
-  for (let j = 0; j <= m; j++) dp[j] = j;
-
-  for (let i = 1; i <= n; i++) {
-    let prev = dp[0];
-    dp[0] = i;
-    for (let j = 1; j <= m; j++) {
-      const tmp = dp[j];
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      dp[j] = Math.min(
-        dp[j] + 1, // delete
-        dp[j - 1] + 1, // insert
-        prev + cost // replace
-      );
-      prev = tmp;
-    }
-  }
-  return dp[m];
-}
-
-function similarity(a, b) {
-  const aa = normalizeLettersOnly(a);
-  const bb = normalizeLettersOnly(b);
-  const maxLen = Math.max(aa.length, bb.length);
-  if (!maxLen) return 0;
-  const dist = levenshtein(aa, bb);
-  return 1 - dist / maxLen;
-}
-
-function extractActivityAndStrip(line) {
-  // Online case (anywhere near the end)
-  if (/\bonline\b/i.test(line)) {
-    return {
-      activity: "Online",
-      lineNoActivity: line.replace(/\bonline\b/gi, "").trim(),
-    };
-  }
-
-  // Time at end: 1h, 3d, 5m (allow OCR junk in the number)
-  const m = line.match(/\b([0-9A-Za-z]{1,2})\s*([mhd])\.?\s*$/i);
-  if (!m || m.index == null) {
-    return { activity: "n/a", lineNoActivity: line.trim() };
-  }
-
-  let num = m[1];
-  const unit = m[2].toLowerCase();
-
-  const map = {
-    a: "3",
-    A: "3",
-    T: "1",
-    I: "1",
-    l: "1",
-    O: "0",
-    o: "0",
-    S: "5",
-    s: "5",
-  };
-  num = num
-    .split("")
-    .map((ch) => (map[ch] ?? ch))
-    .join("");
-
-  const activity = /^\d{1,2}$/.test(num) ? `${parseInt(num, 10)}${unit}` : "n/a";
-  const lineNoActivity = line.slice(0, m.index).trim();
-
-  return { activity, lineNoActivity };
-}
-
-function bestMatchRank(rawRank, rankList) {
-  if (!rawRank) return "";
-
-  // Keep your “safe” cleanup
-  let cleaned = rawRank
-    .toUpperCase()
-    .replace(/[^A-Z\s]/g, " ")
+  let cleaned = raw
+    .replace(/[“”]/g, '"')
+    .replace(/\u00A0/g, " ")
+    .replace(/[^A-Za-z\s]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 
   cleaned = cleaned
-    .replace(/\bSOSS\b/g, "BOSS")
-    .replace(/\bPONN?\b/g, "DONN")
-    .replace(/\bOWN\b/g, "DONN");
+    .replace(/\bSOSS\b/gi, "Boss")
+    .replace(/\bPONN?\b/gi, "Donn")
+    .replace(/\bPEPUTY\b/gi, "Deputy")
+    .replace(/\bDEPULY\b/gi, "Deputy");
 
-  // If they provided ranks, snap to closest.
-  if (Array.isArray(rankList) && rankList.length) {
-    let best = { rank: titleCase(cleaned), score: 0 };
+  cleaned = titleCase(cleaned);
 
-    for (const r of rankList) {
-      const score = similarity(cleaned, r);
-      const a = normalizeLettersOnly(cleaned);
-      const b = normalizeLettersOnly(r);
-      const bonus = a.includes(b) || b.includes(a) ? 0.12 : 0;
-      const finalScore = score + bonus;
-
-      if (finalScore > best.score) best = { rank: r, score: finalScore };
-    }
-
-    // Threshold: below this, don’t force it (avoids bad snapping)
-    if (best.score >= 0.62) return best.rank;
-  }
-
-  return titleCase(cleaned);
+  return titleCase(pickClosestRank(cleaned, hints));
 }
 
-function parseRowsFromOcr(rawText, rankList) {
+function parseRowsFromOcr(rawText) {
+  const hints = getRankHints();
   const lines = (rawText || "")
     .split(/\r?\n/)
     .map((l) => l.trim())
@@ -208,7 +177,6 @@ function parseRowsFromOcr(rawText, rankList) {
   const rows = [];
 
   for (let line of lines) {
-    // Skip header-ish lines
     if (/members|member\s*ranks|honor\s*points|activity|lvl/i.test(line)) continue;
 
     line = line
@@ -218,19 +186,19 @@ function parseRowsFromOcr(rawText, rankList) {
       .replace(/\s+/g, " ")
       .trim();
 
-    // Strip leading bullets / row numbers like "1 " or "© 1 "
-    line = line.replace(/^[^A-Za-z0-9]*\d+\s+/, "").trim();
+    line = line.replace(/^\d+\s+/, "");
 
-    // 1) Pull activity off the end FIRST so it can't contaminate honor
-    const { activity, lineNoActivity } = extractActivityAndStrip(line);
+    const activity = extractActivity(line) || "n/a";
 
-    // 2) Honor = LAST numeric group BEFORE activity (allow 0, 30, 250, 30 050, etc)
-    const numGroups = [...lineNoActivity.matchAll(/\b\d[\d\s]*\b/g)].map(
+    let lineNoActivity = line.replace(/\bonline\b/gi, "").trim();
+    lineNoActivity = lineNoActivity.replace(/\bx\s*\d+\b/gi, "").trim();
+
+    const numMatches = [...lineNoActivity.matchAll(/\b\d[\d\s]*\b/g)].map(
       (m) => m[0]
     );
-    if (!numGroups.length) continue;
+    if (!numMatches.length) continue;
 
-    const honorText = numGroups[numGroups.length - 1];
+    const honorText = numMatches[numMatches.length - 1];
     const honor = parseInt(honorText.replace(/\s+/g, ""), 10);
     if (!Number.isFinite(honor)) continue;
 
@@ -238,23 +206,34 @@ function parseRowsFromOcr(rawText, rankList) {
     const beforeHonor =
       honorIdx > 0 ? lineNoActivity.slice(0, honorIdx).trim() : lineNoActivity;
 
-    // Clean bracket junk like "[5]"
-    const cleanedBefore = beforeHonor
-      .replace(/\[\d+\]/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
+    const mLvl = beforeHonor.match(/\b(\d{1,2})\b/);
+    const lvl = mLvl ? parseInt(mLvl[1], 10) : "";
 
-    // 3) Lvl = first 1–2 digit number in the left side
-    const mLvl = cleanedBefore.match(/\b(\d{1,2})\b/);
-    if (!mLvl) continue;
+    let namePart = beforeHonor;
+    let rankPart = "";
 
-    const lvl = parseInt(mLvl[1], 10);
-    if (!Number.isFinite(lvl)) continue;
+    if (mLvl) {
+      const lvlIdx = beforeHonor.indexOf(mLvl[1]);
+      namePart = beforeHonor.slice(0, lvlIdx).trim();
+      rankPart = beforeHonor.slice(lvlIdx + mLvl[1].length).trim();
+    } else {
+      const words = beforeHonor.split(" ").filter(Boolean);
+      const tail = words.slice(Math.max(0, words.length - 4)).join(" ");
+      const guessed = pickClosestRank(tail, hints);
+      if (guessed && guessed !== tail) {
+        rankPart = guessed;
+        namePart = beforeHonor
+          .replace(
+            new RegExp(`${tail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`),
+            ""
+          )
+          .trim();
+      } else {
+        rankPart = words.slice(-2).join(" ");
+        namePart = words.slice(0, -2).join(" ");
+      }
+    }
 
-    const lvlIdx = cleanedBefore.indexOf(mLvl[1]);
-
-    // 4) Name = left of lvl
-    let namePart = cleanedBefore.slice(0, lvlIdx).trim();
     namePart = namePart
       .replace(/^[^A-Za-z]+/g, "")
       .replace(/\s+/g, " ")
@@ -262,22 +241,26 @@ function parseRowsFromOcr(rawText, rankList) {
 
     if (namePart.length < 3) continue;
 
-    // 5) Rank = between lvl and honor
-    let rankPart = cleanedBefore.slice(lvlIdx + mLvl[1].length).trim();
-    const rank = bestMatchRank(rankPart, rankList);
+    const rank = normalizeRank(rankPart, hints);
 
-    rows.push({ name: namePart, lvl, rank, honor, activity });
+    rows.push({
+      name: namePart,
+      lvl,
+      rank,
+      honor,
+      activity,
+    });
   }
 
-  // De-dup
   const seen = new Set();
   const out = [];
   for (const r of rows) {
-    const k = `${r.name}|${r.lvl}|${r.honor}|${r.activity}`;
+    const k = `${r.name}|${r.lvl}|${r.rank}|${r.honor}|${r.activity}`;
     if (seen.has(k)) continue;
     seen.add(k);
     out.push(r);
   }
+
   return out;
 }
 
@@ -289,6 +272,17 @@ function rowsToCsv(rows) {
     lines.push([q(r.name), r.lvl, q(r.rank), r.honor, q(r.activity)].join(","));
   }
   return lines.join("\n");
+}
+
+function upscaleCanvas(srcCanvas, scale = 2) {
+  const dst = document.createElement("canvas");
+  dst.width = Math.max(1, Math.floor(srcCanvas.width * scale));
+  dst.height = Math.max(1, Math.floor(srcCanvas.height * scale));
+  const ctx = dst.getContext("2d");
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(srcCanvas, 0, 0, dst.width, dst.height);
+  return dst;
 }
 
 async function doOCR(canvas) {
@@ -387,12 +381,13 @@ extractBtn.addEventListener("click", async () => {
       imageSmoothingQuality: "high",
     });
 
-    const data = await doOCR(canvas);
+    const ocrCanvas = upscaleCanvas(canvas, 2);
+    const data = await doOCR(ocrCanvas);
 
     // Always show raw OCR (even if no rows parse)
     rawEl.value = data && data.text ? data.text : "";
 
-    const rows = parseRowsFromOcr(rawEl.value, rankList);
+    const rows = parseRowsFromOcr(rawEl.value);
     if (!rows.length) {
       csvEl.value = "";
       setStatus("No rows detected. Crop tighter around ONLY the rows and try again.");
