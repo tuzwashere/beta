@@ -1,7 +1,7 @@
 // OSRP Gang Scanner -> CSV (robust word-box parsing for mobile/desktop)
 // Drop-in app.js
 
-const BUILD = "v8"; // bump when you deploy
+const BUILD = "v9"; // bump when you deploy
 document.title = `OSRP Gang Scanner → CSV (${BUILD})`;
 
 const fileEl = document.getElementById("file");
@@ -67,13 +67,27 @@ function digitsOnly(token) {
 }
 
 function normalizeActivityFromTokens(tokens) {
-  const joined = tokens.join(" ").trim();
+  const joined = tokens.join(" ").replace(/\s+/g, " ").trim();
   if (!joined) return "n/a";
-  if (/\bonline\b/i.test(joined)) return "Online";
-  if (/(^|\s)(on|0n)(\s|$)/i.test(joined)) return "Online"; // mobile truncation
 
-  const m = joined.match(/\b(\d{1,2})\s*([mhd])\.?\b/i);
+  // Common Online variants
+  if (/\bonline\b/i.test(joined)) return "Online";
+  if (/(^|\s)(on|0n|onl|0nl|onli|0nli)(\s|$)/i.test(joined)) return "Online";
+
+  // If OCR mangles "Online" into a letters-only word (ex: "TERN") in the last column,
+  // it’s still almost certainly Online.
+  const alpha = joined.replace(/[^A-Za-z]/g, "");
+  if (alpha.length >= 3 && alpha.length <= 10) return "Online";
+
+  // Fix super common OCR: "Sh." meaning "5h."
+  const fixed = joined
+    .replace(/\b[Ss]\s*h\.?\b/g, "5h")
+    .replace(/\b[Ss]h\.?\b/g, "5h");
+
+  // Time like 7h / 13 h. / 5 m.
+  const m = fixed.match(/\b(\d{1,2})\s*([mhd])\.?\b/i);
   if (m) return `${parseInt(m[1], 10)}${m[2].toLowerCase()}`;
+
   return "n/a";
 }
 
@@ -85,13 +99,19 @@ function cleanName(words) {
     .replace(/\s+/g, " ")
     .trim();
 
-  // Remove leading row index
-  s = s.replace(/^\d+\s+/, "").trim();
+  // Strip leading bullets/junk
+  s = s.replace(/^[^\w]+/g, "").trim();
 
-  // Remove common OCR junk prefix (Ol / 0l / O1 / 01 etc)
-  s = s.replace(/^(?:ol|0l|o1|01|l|i)\s+/i, "").trim();
+  // Strip row index patterns: "3) Name", "3. Name", "3 - Name", "3: Name"
+  s = s.replace(/^\d+\s*[\)\.\:\-—–]\s*/g, "");
 
-  return s;
+  // Strip single-letter / 1-2 char junk tokens: "B- Name", "x Name"
+  s = s.replace(/^[A-Za-z]{1,2}\s*[\)\.\:\-—–]\s*/g, "");
+
+  // Strip plain "3 Name"
+  s = s.replace(/^\d+\s+/g, "");
+
+  return s.trim();
 }
 
 // PATCH: drop 1–2 letter junk like Ey/Wy/NF + fix Donn/Boss OCR typos
@@ -361,12 +381,21 @@ function findHeaderCenters(words, canvasWidth) {
   }
 
   const activityCandidates = words
-    .filter(w =>
-      /\bonline\b/i.test(w.text) ||
-      /^(on|0n)$/i.test(w.text.trim()) ||
-      /\b\d{1,2}\s*[mhd]\.?\b/i.test(w.text)
-    )
-    .filter(w => w.cx > canvasWidth * 0.70);
+    .filter(w => w.cx > canvasWidth * 0.68)
+    .filter(w => {
+      const t = String(w.text || "").trim();
+
+      // normal cases
+      if (/\bonline\b/i.test(t)) return true;
+      if (/^(on|0n)$/i.test(t)) return true;
+      if (/\b\d{1,2}\s*[mhd]\.?\b/i.test(t)) return true;
+
+      // "Online" mangled into letters-only token (TERN, TERN., etc)
+      const alpha = t.replace(/[^A-Za-z]/g, "");
+      if (alpha.length >= 3 && alpha.length <= 10) return true;
+
+      return false;
+    });
 
   if (activityCandidates.length >= 3) {
     const xs = activityCandidates.map(w => w.cx).sort((a, b) => a - b);
