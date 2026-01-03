@@ -232,7 +232,7 @@ function preprocessCanvas(srcCanvas) {
     sum += y;
   }
   const mean = sum / (data.length / 4);
-  const thr = Math.min(215, Math.max(140, mean - 10));
+  const thr = Math.min(225, Math.max(125, mean - 25));
 
   for (let i = 0; i < data.length; i += 4) {
     const y = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114);
@@ -407,22 +407,27 @@ function parseRowsFromWordBoxes(wordBoxes, canvasWidth) {
 
     const lvl = lvlCandidates[0].n;
 
-    // HONOR: stitch digit chunks in the honor region (capture "133" + "040" => 133040)
-    const honorLeft = honorCx - canvasWidth * 0.22;
-    const honorRight = activityCx - canvasWidth * 0.10;
+    // HONOR: stitch digit chunks near honorCx, but ONLY chunks that look like honor formatting.
+    // Rules:
+    // - prefer 3-digit chunks (e.g., "26" + "200" or "133" + "040")
+    // - ignore 1–2 digit tokens (those are usually LVL/row index noise)
+    // - ignore tokens too far from honorCx
+    const honorBand = canvasWidth * 0.10;
 
-    const honorTokens = w
-      .filter(x => x.cx >= honorLeft && x.cx <= honorRight)
-      .map(x => ({ x, n: digitsOnly(x.text) }))
+    const honorParts = w
+      .map(x => ({ x, n: digitsOnly(x.text), t: String(x.text || "").trim() }))
       .filter(z => z.n !== null)
+      .filter(z => Math.abs(z.x.cx - honorCx) <= honorBand)
+      // keep chunks that are at least 3 digits OR exactly 0 (real honor can be 0)
+      .filter(z => z.n === 0 || String(z.n).length >= 3)
       .sort((a, b) => a.x.cx - b.x.cx);
 
     let honor = 0;
-    if (honorTokens.length >= 2) {
-      const stitched = honorTokens.map(z => String(z.n)).join("");
-      honor = stitched ? parseInt(stitched, 10) : 0;
-    } else if (honorTokens.length === 1) {
-      honor = honorTokens[0].n;
+    if (honorParts.length >= 2) {
+      const stitched = honorParts.map(z => String(z.n).padStart(3, "0")).join("");
+      honor = parseInt(stitched, 10);
+    } else if (honorParts.length === 1) {
+      honor = honorParts[0].n;
     } else {
       honor = 0;
     }
