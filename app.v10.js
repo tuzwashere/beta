@@ -445,63 +445,70 @@ function parseRowsFromWordBoxes(wordBoxes, canvasWidth) {
 
     const lvl = lvlCandidates[0].n;
 
-    // HONOR: use a stable region between rank area and activity area.
-    // This avoids honorCx drift causing honor to disappear.
-    const honorLeft = honorCx - canvasWidth * 0.18;
-    const honorRight = activityCx - canvasWidth * 0.14;
-
-    const honorRaw = w
-      .filter(x => x.cx >= honorLeft && x.cx <= honorRight)
-      .map(x => ({ x, n: digitsOnly(x.text), s: String(x.text || "").trim() }))
-      .filter(z => z.n !== null)
+    // HONOR (robust): take all numeric tokens in the row (excluding row index, LVL, and Activity area),
+    // stitch nearby chunks (ex: "26" + "200" => "26200"), then pick the largest resulting number.
+    const numsAll = w
+      .map(x => {
+        const s = String(x.text || "").trim();
+        const n = digitsOnly(s);
+        if (n === null) return null;
+        const d = s.replace(/\D/g, ""); // keep original digits (preserve leading zeros if any)
+        if (!d) return null;
+        return { x, n, d };
+      })
+      .filter(Boolean)
       .sort((a, b) => a.x.cx - b.x.cx);
 
-    // Keep only likely honor chunks:
-    // - allow 3+ digit chunks always (200, 970, 26200, 11970, etc)
-    // - allow 1–2 digit chunk ONLY if it is immediately followed by a 3-digit chunk (26 + 200)
-    const parts = [];
-    for (let i = 0; i < honorRaw.length; i++) {
-      const cur = honorRaw[i];
-      const curLen = String(cur.n).length;
+    // Exclude: far-left row index, LVL column, and far-right activity column.
+    const honorCandidates = numsAll.filter(t => {
+      const cx = t.x.cx;
 
-      if (cur.n === 0) {
-        // keep 0 only if it's the only thing we find
-        parts.push(cur);
+      // row index area (1..99) on far left
+      if (cx < canvasWidth * 0.12 && t.n <= 99) return false;
+
+      // LVL area
+      if (Math.abs(cx - lvlCx) <= canvasWidth * 0.09 && t.n <= 99) return false;
+
+      // Activity area (right-most); time digits like "7", "13" often live here
+      if (cx > (activityCx - canvasWidth * 0.11) && t.n <= 99) return false;
+
+      return true;
+    });
+
+    // Stitch adjacent chunks by proximity (works for "26" + "200", "133" + "040", etc)
+    const groups = [];
+    for (const t of honorCandidates) {
+      const last = groups[groups.length - 1];
+      if (!last) {
+        groups.push({ ds: [t.d], lastCx: t.x.cx });
         continue;
       }
 
-      if (curLen >= 3) {
-        parts.push(cur);
-        continue;
-      }
+      const dx = t.x.cx - last.lastCx;
 
-      // 1–2 digit prefix rule (e.g., "26" before "200")
-      const next = honorRaw[i + 1];
-      if (next && String(next.n).length === 3) {
-        // also require the next chunk to be close on x axis
-        if ((next.x.cx - cur.x.cx) <= canvasWidth * 0.08) {
-          parts.push(cur);
-          continue;
-        }
+      // if chunks are close, treat as same number
+      if (dx <= canvasWidth * 0.07) {
+        last.ds.push(t.d);
+        last.lastCx = t.x.cx;
+      } else {
+        groups.push({ ds: [t.d], lastCx: t.x.cx });
       }
     }
 
-    // Build honor
+    // Pick the best honor value
     let honor = 0;
-    if (parts.length) {
-      // If we captured a split like 26 + 200, stitch as "26" + "200"
-      // If it's already a full number like 28200, it's just one part.
-      const stitched = parts.map(p => String(p.n)).join("");
-      honor = stitched ? parseInt(stitched, 10) : 0;
-
-      // If honor is clearly nonsense small (like 57 + 1970 => 571970), don’t trust it.
-      // Fallback to the single largest numeric token in the region.
-      if (honor > 999999 || honor < 0) {
-        const best = honorRaw.reduce((mx, z) => Math.max(mx, z.n), 0);
-        honor = best || 0;
+    for (const g of groups) {
+      const stitched = g.ds.join("");
+      if (!stitched) continue;
+      const val = parseInt(stitched, 10);
+      if (Number.isFinite(val) && val >= 0 && val <= 50000000) {
+        honor = Math.max(honor, val);
       }
-    } else {
-      honor = 0;
+    }
+
+    // If we still got 0 but there were candidates, fallback to largest single token
+    if (honor === 0 && honorCandidates.length) {
+      honor = honorCandidates.reduce((mx, t) => Math.max(mx, t.n), 0);
     }
 
     // Name: everything clearly left of lvl column
