@@ -123,10 +123,20 @@ function similarity(a, b) {
   return 1 - dist / maxLen;
 }
 
-function extractActivity(line) {
-  if (/\bonline\b/i.test(line)) return "Online";
+function extractActivityAndStrip(line) {
+  // Online case (anywhere near the end)
+  if (/\bonline\b/i.test(line)) {
+    return {
+      activity: "Online",
+      lineNoActivity: line.replace(/\bonline\b/gi, "").trim(),
+    };
+  }
+
+  // Time at end: 1h, 3d, 5m (allow OCR junk in the number)
   const m = line.match(/\b([0-9A-Za-z]{1,2})\s*([mhd])\.?\s*$/i);
-  if (!m) return null;
+  if (!m || m.index == null) {
+    return { activity: "n/a", lineNoActivity: line.trim() };
+  }
 
   let num = m[1];
   const unit = m[2].toLowerCase();
@@ -146,9 +156,11 @@ function extractActivity(line) {
     .split("")
     .map((ch) => (map[ch] ?? ch))
     .join("");
-  if (!/^\d{1,2}$/.test(num)) return null;
 
-  return `${parseInt(num, 10)}${unit}`;
+  const activity = /^\d{1,2}$/.test(num) ? `${parseInt(num, 10)}${unit}` : "n/a";
+  const lineNoActivity = line.slice(0, m.index).trim();
+
+  return { activity, lineNoActivity };
 }
 
 function bestMatchRank(rawRank, rankList) {
@@ -196,6 +208,7 @@ function parseRowsFromOcr(rawText, rankList) {
   const rows = [];
 
   for (let line of lines) {
+    // Skip header-ish lines
     if (/members|member\s*ranks|honor\s*points|activity|lvl/i.test(line)) continue;
 
     line = line
@@ -205,41 +218,52 @@ function parseRowsFromOcr(rawText, rankList) {
       .replace(/\s+/g, " ")
       .trim();
 
-    // Honor = last big number group (handles "132 920")
-    const honorMatches = [...line.matchAll(/\b\d[\d\s]{2,}\b/g)].map(
-      (x) => x[0]
-    );
-    if (!honorMatches.length) continue;
+    // Strip leading bullets / row numbers like "1 " or "© 1 "
+    line = line.replace(/^[^A-Za-z0-9]*\d+\s+/, "").trim();
 
-    const honorText = honorMatches[honorMatches.length - 1];
+    // 1) Pull activity off the end FIRST so it can't contaminate honor
+    const { activity, lineNoActivity } = extractActivityAndStrip(line);
+
+    // 2) Honor = LAST numeric group BEFORE activity (allow 0, 30, 250, 30 050, etc)
+    const numGroups = [...lineNoActivity.matchAll(/\b\d[\d\s]*\b/g)].map(
+      (m) => m[0]
+    );
+    if (!numGroups.length) continue;
+
+    const honorText = numGroups[numGroups.length - 1];
     const honor = parseInt(honorText.replace(/\s+/g, ""), 10);
     if (!Number.isFinite(honor)) continue;
 
-    const activity = extractActivity(line) || "n/a";
+    const honorIdx = lineNoActivity.lastIndexOf(honorText);
+    const beforeHonor =
+      honorIdx > 0 ? lineNoActivity.slice(0, honorIdx).trim() : lineNoActivity;
 
-    const honorIdx = line.lastIndexOf(honorText);
-    const beforeHonor = honorIdx > 0 ? line.slice(0, honorIdx).trim() : line;
+    // Clean bracket junk like "[5]"
+    const cleanedBefore = beforeHonor
+      .replace(/\[\d+\]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
 
-    // lvl = first 1–2 digit number
-    const mLvl = beforeHonor.match(/\b(\d{1,2})\b/);
+    // 3) Lvl = first 1–2 digit number in the left side
+    const mLvl = cleanedBefore.match(/\b(\d{1,2})\b/);
     if (!mLvl) continue;
+
     const lvl = parseInt(mLvl[1], 10);
     if (!Number.isFinite(lvl)) continue;
 
-    const lvlIdx = beforeHonor.indexOf(mLvl[1]);
+    const lvlIdx = cleanedBefore.indexOf(mLvl[1]);
 
-    // name = before lvl
-    let namePart = beforeHonor.slice(0, lvlIdx).trim();
+    // 4) Name = left of lvl
+    let namePart = cleanedBefore.slice(0, lvlIdx).trim();
     namePart = namePart
       .replace(/^[^A-Za-z]+/g, "")
-      .replace(/\b(BR|es)\b/gi, "")
       .replace(/\s+/g, " ")
       .trim();
 
     if (namePart.length < 3) continue;
 
-    // rank = between lvl and honor
-    let rankPart = beforeHonor.slice(lvlIdx + mLvl[1].length).trim();
+    // 5) Rank = between lvl and honor
+    let rankPart = cleanedBefore.slice(lvlIdx + mLvl[1].length).trim();
     const rank = bestMatchRank(rankPart, rankList);
 
     rows.push({ name: namePart, lvl, rank, honor, activity });
