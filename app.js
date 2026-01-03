@@ -191,7 +191,9 @@ function parseRowsFromOcr(rawText) {
     const activity = extractActivity(line) || "n/a";
 
     let lineNoActivity = line.replace(/\bonline\b/gi, "").trim();
-    lineNoActivity = lineNoActivity.replace(/\bx\s*\d+\b/gi, "").trim();
+    lineNoActivity = lineNoActivity
+      .replace(/\b[×x]\s*[0-9Oo]{1,4}\b/gi, () => "")
+      .trim();
 
     const numMatches = [...lineNoActivity.matchAll(/\b\d[\d\s]*\b/g)].map(
       (m) => m[0]
@@ -199,7 +201,11 @@ function parseRowsFromOcr(rawText) {
     if (!numMatches.length) continue;
 
     const honorText = numMatches[numMatches.length - 1];
-    const honor = parseInt(honorText.replace(/\s+/g, ""), 10);
+    const honorNorm = honorText
+      .replace(/\s+/g, "")
+      .replace(/O/g, "0")
+      .replace(/o/g, "0");
+    const honor = parseInt(honorNorm, 10);
     if (!Number.isFinite(honor)) continue;
 
     const honorIdx = lineNoActivity.lastIndexOf(honorText);
