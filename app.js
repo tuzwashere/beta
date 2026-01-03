@@ -10,7 +10,7 @@ const clearBtn = document.getElementById("clear");
 const csvEl = document.getElementById("csv");
 const rawEl = document.getElementById("raw");
 const statusEl = document.getElementById("status");
-const addMoreBtn = document.getElementById("addMore");
+const appendBtn = document.getElementById("appendImageBtn");
 
 // Optional ranks UI (if present in your HTML)
 const ranksEl = document.getElementById("ranks") || document.getElementById("gangRanks");
@@ -18,8 +18,9 @@ const saveRanksBtn = document.getElementById("saveRanks");
 
 let cropper = null;
 let currentObjectUrl = null;
-let accumulatedRows = [];
-let accumulatedRawChunks = [];
+let appendMode = false;
+let allRows = [];
+let allRawBlocks = [];
 
 function setStatus(t) { statusEl.textContent = t; }
 
@@ -35,43 +36,15 @@ function cleanupImage() {
   csvEl.value = "";
   rawEl.value = "";
   setStatus("Waiting for image…");
-  accumulatedRows = [];
-  accumulatedRawChunks = [];
-  if (addMoreBtn) addMoreBtn.disabled = true;
+  appendMode = false;
+  allRows = [];
+  allRawBlocks = [];
+  if (appendBtn) appendBtn.disabled = true;
 }
 
 // ---------------------------
 // Helpers
 // ---------------------------
-function rowKey(r) {
-  const name = (r.name || "").trim().toLowerCase();
-  const lvl = Number(r.lvl || 0);
-  const honor = Number(r.honor || 0);
-  return `${name}|${lvl}|${honor}`;
-}
-
-function mergeAppendRows(existing, incoming) {
-  const map = new Map();
-  for (const r of existing) map.set(rowKey(r), r);
-
-  for (const r of incoming) {
-    const k = rowKey(r);
-    if (!map.has(k)) {
-      map.set(k, r);
-    } else {
-      const prev = map.get(k);
-      if ((!prev.rank || prev.rank.length < 3) && (r.rank && r.rank.length >= 3)) {
-        map.set(k, { ...prev, rank: r.rank });
-      }
-      if ((prev.activity === "n/a") && (r.activity && r.activity !== "n/a")) {
-        map.set(k, { ...prev, activity: r.activity });
-      }
-    }
-  }
-
-  return Array.from(map.values());
-}
-
 function titleCase(s) {
   return (s || "")
     .toLowerCase()
@@ -127,11 +100,10 @@ function cleanRank(words) {
     .replace(/\s+/g, " ")
     .trim();
 
-  // Drop common 1–2 letter badge junk + stray single letters
-  const junk = new Set(["RY", "UW", "WY", "NF", "NL", "RS", "BB", "TF"]);
+  // Drop 1–2 letter junk tokens (badge/icon noise: EY/WY/NF/NL/UW/RY/etc)
   cleaned = cleaned
     .split(" ")
-    .filter(t => t.length >= 3 && !junk.has(t))
+    .filter(t => t.length >= 3)
     .join(" ")
     .trim();
 
@@ -140,7 +112,8 @@ function cleanRank(words) {
     .replace(/\bPONN\b/g, "DONN")
     .replace(/\bPON\b/g, "DONN")
     .replace(/\bSOSS\b/g, "BOSS")
-    .replace(/\bB0SS\b/g, "BOSS");
+    .replace(/\bB0SS\b/g, "BOSS")
+    .replace(/\bG0DFATHER\b/g, "GODFATHER");
 
   return titleCase(cleaned);
 }
@@ -209,6 +182,10 @@ const DEFAULT_RANKS = [
   "Boss",
   "Donn",
   "Godfather",
+  "Top Executives",
+  "Generals",
+  "Top Shooters",
+  "Foot Soldiers",
 ];
 
 function getRankList() {
@@ -406,39 +383,48 @@ function parseRowsFromWordBoxes(wordBoxes, canvasWidth) {
   for (const row of rows) {
     const w = row.words;
 
-    // LVL: nearest 1–99 digit token to lvlCx
-    // IMPORTANT: ignore far-left row index column so "6" doesn't get picked as LVL.
-    const lvlBand = canvasWidth * 0.07;
-    const minLvlX = canvasWidth * 0.22; // blocks the left row number column
-
-    const lvlCand = w
+    // LVL: choose best numeric token near lvlCx (distance + confidence weighted)
+    const lvlBand = canvasWidth * 0.08;
+    const lvlCandidates = w
       .map(x => ({ x, n: digitsOnly(x.text) }))
       .filter(z => z.n !== null && z.n >= 1 && z.n <= 99)
-      .filter(z => z.x.cx >= minLvlX) // <-- key fix
-      .filter(z => Math.abs(z.x.cx - lvlCx) <= lvlBand || z.x.cx < honorCx)
-      .sort((a, b) => Math.abs(a.x.cx - lvlCx) - Math.abs(b.x.cx - lvlCx));
+      .filter(z => Math.abs(z.x.cx - lvlCx) <= lvlBand);
 
-    const lvl = lvlCand.length ? lvlCand[0].n : null;
-    if (lvl === null) continue;
+    if (!lvlCandidates.length) continue;
 
-    // HONOR: stitch digit chunks near honorCx (e.g., "30" + "050" => 30050)
-    const honorBand = canvasWidth * 0.09;
-    const honorWords = w
-      .filter(x => Math.abs(x.cx - honorCx) <= honorBand)
+    lvlCandidates.sort((a, b) => {
+      const da = Math.abs(a.x.cx - lvlCx) / lvlBand;
+      const db = Math.abs(b.x.cx - lvlCx) / lvlBand;
+
+      const ca = 1 - (Math.max(0, Math.min(100, a.x.conf)) / 100);
+      const cb = 1 - (Math.max(0, Math.min(100, b.x.conf)) / 100);
+
+      // distance matters, but low confidence gets penalized
+      const scoreA = da * 0.65 + ca * 0.35;
+      const scoreB = db * 0.65 + cb * 0.35;
+      return scoreA - scoreB;
+    });
+
+    const lvl = lvlCandidates[0].n;
+
+    // HONOR: stitch digit chunks in the honor region (capture "133" + "040" => 133040)
+    const honorLeft = honorCx - canvasWidth * 0.22;
+    const honorRight = activityCx - canvasWidth * 0.10;
+
+    const honorTokens = w
+      .filter(x => x.cx >= honorLeft && x.cx <= honorRight)
       .map(x => ({ x, n: digitsOnly(x.text) }))
       .filter(z => z.n !== null)
       .sort((a, b) => a.x.cx - b.x.cx);
 
     let honor = 0;
-    if (honorWords.length) {
-      const stitched = honorWords.map(z => String(z.n)).join("");
+    if (honorTokens.length >= 2) {
+      const stitched = honorTokens.map(z => String(z.n)).join("");
       honor = stitched ? parseInt(stitched, 10) : 0;
+    } else if (honorTokens.length === 1) {
+      honor = honorTokens[0].n;
     } else {
-      const fallback = w
-        .map(x => ({ x, n: digitsOnly(x.text) }))
-        .filter(z => z.n !== null)
-        .sort((a, b) => Math.abs(a.x.cx - honorCx) - Math.abs(b.x.cx - honorCx));
-      honor = fallback.length ? fallback[0].n : 0;
+      honor = 0;
     }
 
     // Name: everything clearly left of lvl column
@@ -514,6 +500,10 @@ function loadRanks() {
     "Boss",
     "Donn",
     "Godfather",
+    "Top Executives",
+    "Generals",
+    "Top Shooters",
+    "Foot Soldiers",
   ].join("\n");
 
   if (saved.trim()) {
@@ -565,9 +555,28 @@ downloadBtn?.addEventListener("click", () => {
 // ---------------------------
 // UI wiring
 // ---------------------------
+if (appendBtn) {
+  appendBtn.addEventListener("click", () => {
+    // Next file selection should append (not clear)
+    appendMode = true;
+    fileEl.click();
+  });
+}
+
 fileEl.addEventListener("change", () => {
   const f = fileEl.files && fileEl.files[0];
   if (!f) return;
+
+  // If user picked a new file normally (not via append button), start fresh.
+  if (!appendMode) {
+    csvEl.value = "";
+    rawEl.value = "";
+    allRows = [];
+    allRawBlocks = [];
+  } else {
+    // Keep existing output; this new image will append.
+    setStatus("Appending image… crop and Extract to add rows.");
+  }
 
   if (cropper) { cropper.destroy(); cropper = null; }
   if (currentObjectUrl) URL.revokeObjectURL(currentObjectUrl);
@@ -593,16 +602,9 @@ fileEl.addEventListener("change", () => {
     clearBtn.disabled = false;
     copyBtn.disabled = true;
     downloadBtn.disabled = true;
-    if (addMoreBtn) addMoreBtn.disabled = false;
+    if (appendBtn) appendBtn.disabled = false;
   };
 });
-
-if (addMoreBtn) {
-  addMoreBtn.addEventListener("click", () => {
-    fileEl.value = "";
-    fileEl.click();
-  });
-}
 
 extractBtn.addEventListener("click", async () => {
   if (!cropper) return;
@@ -636,17 +638,52 @@ extractBtn.addEventListener("click", async () => {
       return;
     }
 
-    const rawChunk = (data.text || "").trim();
-    if (rawChunk) {
-      accumulatedRawChunks.push(rawChunk);
-      rawEl.value = accumulatedRawChunks.join("\n\n---\n\n");
+    // Raw OCR: append blocks when in appendMode
+    const rawBlock = (data.text || "").trim();
+    if (appendMode) {
+      if (rawBlock) allRawBlocks.push(rawBlock);
+      rawEl.value = allRawBlocks.join("\n\n---\n\n");
+    } else {
+      allRawBlocks = rawBlock ? [rawBlock] : [];
+      rawEl.value = rawBlock;
     }
 
-    accumulatedRows = mergeAppendRows(accumulatedRows, rows);
-    csvEl.value = rowsToCsv(accumulatedRows);
-    setStatus(`Added ${rows.length} row(s). Total now: ${accumulatedRows.length}.`);
+    // Rows: merge into allRows when appending
+    function keyRow(r) {
+      return (r.name || "").toLowerCase().trim();
+    }
+
+    if (appendMode) {
+      const map = new Map(allRows.map(r => [keyRow(r), r]));
+
+      for (const r of rows) {
+        const k = keyRow(r);
+        if (!k) continue;
+
+        if (!map.has(k)) {
+          map.set(k, r);
+        } else {
+          // update existing: keep highest honor, prefer non-empty rank/activity, prefer latest lvl if present
+          const prev = map.get(k);
+          prev.lvl = r.lvl ?? prev.lvl;
+          prev.rank = (r.rank && r.rank.trim()) ? r.rank : prev.rank;
+          prev.activity = (r.activity && r.activity !== "n/a") ? r.activity : prev.activity;
+          prev.honor = Math.max(prev.honor || 0, r.honor || 0);
+        }
+      }
+
+      allRows = Array.from(map.values());
+    } else {
+      allRows = rows.slice();
+    }
+
+    csvEl.value = rowsToCsv(allRows);
+    setStatus(`Total ${allRows.length} row(s) in CSV. ${appendMode ? "Appended." : "Extracted."}`);
     copyBtn.disabled = false;
     downloadBtn.disabled = false;
+
+    // After a successful append extraction, turn appendMode off so normal "Choose File" starts fresh next time
+    appendMode = false;
   } catch (e) {
     console.error(e);
     setStatus("OCR failed. Try cropping tighter or use a clearer screenshot.");
