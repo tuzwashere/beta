@@ -92,14 +92,15 @@ function cleanRank(words) {
     .replace(/\s+/g, " ")
     .trim();
 
-  // Drop 1–2 letter junk tokens (badge/icon noise like EY, WY, NF, NL, etc)
+  // Drop common 1–2 letter badge junk + stray single letters
+  const junk = new Set(["RY", "UW", "WY", "NF", "NL", "RS", "BB", "TF"]);
   cleaned = cleaned
     .split(" ")
-    .filter(t => t.length >= 3)
+    .filter(t => t.length >= 3 && !junk.has(t))
     .join(" ")
     .trim();
 
-  // Fix super-common OCR rank glitches
+  // Fix common OCR glitches
   cleaned = cleaned
     .replace(/\bPONN\b/g, "DONN")
     .replace(/\bPON\b/g, "DONN")
@@ -163,12 +164,34 @@ function bestRankMatch(rankText, rankList) {
   return raw;
 }
 
+const DEFAULT_RANKS = [
+  "Gang Leader",
+  "Deputy",
+  "Cutthroat",
+  "Fighter",
+  "Trainee",
+  "Newbie",
+  "Boss",
+  "Donn",
+  "Godfather",
+];
+
 function getRankList() {
-  if (!ranksEl) return [];
-  return (ranksEl.value || "")
+  const user = (ranksEl?.value || "")
     .split(/\r?\n/)
     .map(s => s.trim())
     .filter(Boolean);
+
+  // merge + de-dupe (case-insensitive)
+  const seen = new Set();
+  const out = [];
+  for (const r of [...user, ...DEFAULT_RANKS]) {
+    const k = r.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(r);
+  }
+  return out;
 }
 
 // ---------------------------
@@ -348,12 +371,16 @@ function parseRowsFromWordBoxes(wordBoxes, canvasWidth) {
   for (const row of rows) {
     const w = row.words;
 
-    // LVL: nearest 1–99 digit token to lvlCx (prefer tokens near the lvl column)
-    const lvlBand = canvasWidth * 0.06;
+    // LVL: nearest 1–99 digit token to lvlCx
+    // IMPORTANT: ignore far-left row index column so "6" doesn't get picked as LVL.
+    const lvlBand = canvasWidth * 0.07;
+    const minLvlX = canvasWidth * 0.22; // blocks the left row number column
+
     const lvlCand = w
       .map(x => ({ x, n: digitsOnly(x.text) }))
       .filter(z => z.n !== null && z.n >= 1 && z.n <= 99)
-      .filter(z => Math.abs(z.x.cx - lvlCx) <= lvlBand || z.x.cx < honorCx) // keep sane region
+      .filter(z => z.x.cx >= minLvlX) // <-- key fix
+      .filter(z => Math.abs(z.x.cx - lvlCx) <= lvlBand || z.x.cx < honorCx)
       .sort((a, b) => Math.abs(a.x.cx - lvlCx) - Math.abs(b.x.cx - lvlCx));
 
     const lvl = lvlCand.length ? lvlCand[0].n : null;
