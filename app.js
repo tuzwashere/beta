@@ -1,7 +1,7 @@
 // OSRP Gang Scanner -> CSV (robust word-box parsing for mobile/desktop)
 // Drop-in app.js
 
-const BUILD = "v16"; // bump when you deploy
+const BUILD = "v17"; // bump when you deploy
 document.title = `OSRP Gang Scanner → CSV (${BUILD})`;
 
 const fileEl = document.getElementById("file");
@@ -395,9 +395,22 @@ function getRankList() {
 // Preprocess
 // ---------------------------
 function preprocessCanvas(srcCanvas) {
-  const scale = 2.2; // slightly lower helps avoid turning 6->8 sometimes
-  const w = Math.max(1, Math.floor(srcCanvas.width * scale));
-  const h = Math.max(1, Math.floor(srcCanvas.height * scale));
+  const MAX_SIDE = 1600;
+  const MAX_PIXELS = 2_200_000;
+
+  const sw = srcCanvas.width;
+  const sh = srcCanvas.height;
+
+  let scale = 2.0;
+
+  const sideScale = Math.min(MAX_SIDE / sw, MAX_SIDE / sh);
+  const pixelScale = Math.sqrt(MAX_PIXELS / (sw * sh));
+
+  scale = Math.min(scale, sideScale, pixelScale);
+  scale = Math.max(0.6, Math.min(2.0, scale));
+
+  const w = Math.max(1, Math.floor(sw * scale));
+  const h = Math.max(1, Math.floor(sh * scale));
 
   const out = document.createElement("canvas");
   out.width = w;
@@ -411,29 +424,17 @@ function preprocessCanvas(srcCanvas) {
   const img = ctx.getImageData(0, 0, w, h);
   const data = img.data;
 
-  // Compute mean luminance for threshold
   let sum = 0;
   for (let i = 0; i < data.length; i += 4) {
-    const r = data[i];
-    const g = data[i + 1];
-    const b = data[i + 2];
-    const y = (r * 0.299 + g * 0.587 + b * 0.114);
+    const y = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114);
     sum += y;
   }
   const mean = sum / (data.length / 4);
-  const thr = Math.min(230, Math.max(120, mean - 18));
+  const thr = Math.min(225, Math.max(125, mean - 25));
 
-  // Binarize, but FORCE green-ish pixels (Online) to black so OCR sees them
   for (let i = 0; i < data.length; i += 4) {
-    const r = data[i];
-    const g = data[i + 1];
-    const b = data[i + 2];
-
-    const isGreenText = (g > r + 25) && (g > b + 25) && (g > 90);
-
-    const y = (r * 0.299 + g * 0.587 + b * 0.114);
-    const v = (isGreenText || y < thr) ? 0 : 255;
-
+    const y = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114);
+    const v = y > thr ? 255 : 0;
     data[i] = v;
     data[i + 1] = v;
     data[i + 2] = v;
@@ -821,18 +822,21 @@ extractBtn.addEventListener("click", async () => {
     const cropped = cropper.getCroppedCanvas({
       imageSmoothingEnabled: true,
       imageSmoothingQuality: "high",
+      maxWidth: 1600,
+      maxHeight: 1000,
+      fillColor: "#000",
     });
 
-    const preText = preprocessForText(cropped);
+    if (!cropped) {
+      setStatus("Crop failed. Try reloading the page.");
+      return;
+    }
 
-    const data = await recognizeCanvas(preText, {
-      logger: (m) => {
-        if (m.status) {
-          const pct = m.progress ? ` (${Math.round(m.progress * 100)}%)` : "";
-          setStatus(`${m.status}${pct}`);
-        }
-      },
-    });
+    setStatus("Preprocessing…");
+    const preText = preprocessCanvas(cropped);
+
+    setStatus("OCR running…");
+    const data = await doOCR(preText);
 
     const rawBlock = (data.text || "").trim();
     if (appendMode) {
