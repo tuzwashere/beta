@@ -1,7 +1,12 @@
-// OSRP Gang Scanner -> CSV (robust word-box parsing for mobile/desktop)
-// Drop-in app.js
+// OSRP Gang Scanner -> CSV (mobile-stable v18)
+// Key changes:
+// - ONE Tesseract worker only (no Tesseract.recognize())
+// - Row detection from horizontal divider lines (less crop sensitivity)
+// - "Online" detected by green pixels (OCR-independent)
+// - Otsu threshold for digits (reduces 6->8 flips)
+// - Auto-detect table start even if menu leaks into crop
 
-const BUILD = "v18"; // bump when you deploy
+const BUILD = "v18";
 document.title = `OSRP Gang Scanner → CSV (${BUILD})`;
 
 const fileEl = document.getElementById("file");
@@ -15,7 +20,6 @@ const rawEl = document.getElementById("raw");
 const statusEl = document.getElementById("status");
 const appendBtn = document.getElementById("appendImageBtn");
 
-// Optional ranks UI (if present in your HTML)
 const ranksEl = document.getElementById("ranks") || document.getElementById("gangRanks");
 const saveRanksBtn = document.getElementById("saveRanksBtn");
 
@@ -25,203 +29,23 @@ let appendMode = false;
 let allRows = [];
 let allRawBlocks = [];
 
-function setStatus(t) { statusEl.textContent = t; }
+function setStatus(t) {
+  statusEl.textContent = t;
+}
 
 function clamp(n, a, b) {
   return Math.max(a, Math.min(b, n));
 }
 
-function cropCanvas(srcCanvas, x, y, w, h) {
-  const out = document.createElement("canvas");
-  out.width = Math.max(1, Math.floor(w));
-  out.height = Math.max(1, Math.floor(h));
-  const ctx = out.getContext("2d");
-  ctx.drawImage(srcCanvas, x, y, w, h, 0, 0, out.width, out.height);
-  return out;
-}
-
-function preprocessForText(srcCanvas) {
-  const scale = 2.2;
-  const w = Math.max(1, Math.floor(srcCanvas.width * scale));
-  const h = Math.max(1, Math.floor(srcCanvas.height * scale));
-  const out = document.createElement("canvas");
-  out.width = w;
-  out.height = h;
-
-  const ctx = out.getContext("2d", { willReadFrequently: true });
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = "high";
-  ctx.drawImage(srcCanvas, 0, 0, w, h);
-
-  const img = ctx.getImageData(0, 0, w, h);
-  const d = img.data;
-
-  for (let i = 0; i < d.length; i += 4) {
-    const y = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
-    const v = clamp((y - 128) * 1.35 + 128, 0, 255);
-    d[i] = v;
-    d[i + 1] = v;
-    d[i + 2] = v;
-    d[i + 3] = 255;
-  }
-
-  ctx.putImageData(img, 0, 0);
-  return out;
-}
-
-function preprocessForDigits(srcCanvas) {
-  const scale = 2.6;
-  const w = Math.max(1, Math.floor(srcCanvas.width * scale));
-  const h = Math.max(1, Math.floor(srcCanvas.height * scale));
-  const out = document.createElement("canvas");
-  out.width = w;
-  out.height = h;
-
-  const ctx = out.getContext("2d", { willReadFrequently: true });
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = "high";
-  ctx.drawImage(srcCanvas, 0, 0, w, h);
-
-  const img = ctx.getImageData(0, 0, w, h);
-  const d = img.data;
-
-  let sum = 0;
-  for (let i = 0; i < d.length; i += 4) {
-    sum += d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
-  }
-  const mean = sum / (d.length / 4);
-  const thr = clamp(mean - 18, 110, 210);
-
-  for (let i = 0; i < d.length; i += 4) {
-    const y = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
-    const v = y > thr ? 255 : 0;
-    d[i] = v;
-    d[i + 1] = v;
-    d[i + 2] = v;
-    d[i + 3] = 255;
-  }
-
-  ctx.putImageData(img, 0, 0);
-  return out;
-}
-
-let _worker = null;
-let _workerBusy = false;
-
-async function getWorker(logger) {
-  if (_worker) return _worker;
-
-  if (!Tesseract?.createWorker) return null;
-
-  const w = await Tesseract.createWorker({ logger });
-
-  // CRITICAL for tesseract.js v5
-  await w.load();
-  await w.loadLanguage("eng");
-  await w.initialize("eng");
-
-  _worker = w;
-  return _worker;
-}
-
-async function recognizeCanvas(canvas, {
-  whitelist = null,
-  logger = null,
-  psm = 6,
-  numericMode = false,
-} = {}) {
-  const worker = await getWorker(logger);
-
-  // Fallback to old API if worker isn’t available
-  if (!worker) {
-    const res = await Tesseract.recognize(canvas, "eng", { logger });
-    return res.data;
-  }
-
-  while (_workerBusy) {
-    await new Promise(r => setTimeout(r, 25));
-  }
-  _workerBusy = true;
-
-  try {
-    const params = {
-      tessedit_pageseg_mode: String(psm),
-      classify_bln_numeric_mode: numericMode ? "1" : "0",
-      tessedit_char_whitelist: whitelist ? whitelist : "",
-    };
-    await worker.setParameters(params);
-
-    const res = await worker.recognize(canvas);
-    return res.data;
-  } finally {
-    _workerBusy = false;
-  }
-}
-
-function parseFirstInt(text) {
-  const m = String(text || "").match(/\d{1,3}/);
-  return m ? parseInt(m[0], 10) : null;
-}
-
-function parseHonorInt(text) {
-  const digits = String(text || "").match(/\d+/g);
-  if (!digits) return 0;
-
-  const nums = digits.map(s => parseInt(s, 10)).filter(n => Number.isFinite(n));
-  const big = nums.filter(n => n >= 1000);
-  if (big.length) return Math.max(...big);
-
-  const stitched = parseInt(digits.join(""), 10);
-  return Number.isFinite(stitched) ? stitched : 0;
-}
-
-function levenshteinSimple(a, b) {
-  a = (a || ""); b = (b || "");
-  const m = a.length, n = b.length;
-  if (!m) return n;
-  if (!n) return m;
-  const dp = new Array(n + 1);
-  for (let j = 0; j <= n; j++) dp[j] = j;
-  for (let i = 1; i <= m; i++) {
-    let prev = dp[0];
-    dp[0] = i;
-    for (let j = 1; j <= n; j++) {
-      const tmp = dp[j];
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      dp[j] = Math.min(dp[j] + 1, dp[j - 1] + 1, prev + cost);
-      prev = tmp;
-    }
-  }
-  return dp[n];
-}
-
-function parseActivity(text) {
-  const t0 = String(text || "").trim();
-  if (!t0) return "n/a";
-
-  // normalize
-  const t = t0.replace(/\s+/g, " ").trim();
-  const letters = t.toLowerCase().replace(/[^a-z]/g, "");
-
-  // Direct + fuzzy Online match
-  if (/\bonline\b/i.test(t)) return "Online";
-  if (letters.length >= 4 && letters.length <= 10) {
-    // catches: onine, orline, 0nline, ouline, etc.
-    const d = levenshteinSimple(letters, "online");
-    if (d <= 2) return "Online";
-    if (letters.includes("onl")) return "Online";
-  }
-
-  // time: 7m / 5h / 1d (allow dot)
-  const m = t.match(/\b(\d{1,2})\s*([mhd])\.?\b/i);
-  if (m) return `${parseInt(m[1], 10)}${m[2].toLowerCase()}`;
-
-  return "n/a";
-}
-
 function cleanupImage() {
-  if (cropper) { cropper.destroy(); cropper = null; }
-  if (currentObjectUrl) { URL.revokeObjectURL(currentObjectUrl); currentObjectUrl = null; }
+  if (cropper) {
+    cropper.destroy();
+    cropper = null;
+  }
+  if (currentObjectUrl) {
+    URL.revokeObjectURL(currentObjectUrl);
+    currentObjectUrl = null;
+  }
   imgEl.style.display = "none";
   imgEl.src = "";
   extractBtn.disabled = true;
@@ -238,76 +62,36 @@ function cleanupImage() {
 }
 
 // ---------------------------
-// Helpers
+// Text helpers
 // ---------------------------
 function titleCase(s) {
   return (s || "")
     .toLowerCase()
     .split(" ")
     .filter(Boolean)
-    .map((w) => w[0].toUpperCase() + w.slice(1))
+    .map(w => w[0].toUpperCase() + w.slice(1))
     .join(" ");
 }
 
-// IMPORTANT: blocks junk like "x30" from becoming 30
-function digitsOnly(token) {
-  const s = String(token || "").trim();
-  if (!s) return null;
-  if (/[A-Za-z]/.test(s)) return null; // reject letter+digit junk
-  const d = s.replace(/[^\d]/g, "");
-  return d ? parseInt(d, 10) : null;
-}
-
-function normalizeActivityFromTokens(tokens) {
-  const joined = tokens.join(" ").replace(/\s+/g, " ").trim();
-  if (!joined) return "n/a";
-
-  // Direct Online variants first
-  if (/\bonline\b/i.test(joined)) return "Online";
-  if (/(^|\s)(on|0n|onl|0nl|onli|0nli)(\s|$)/i.test(joined)) return "Online";
-
-  // Fix super common OCR: "Sh." meaning "5h" (do this BEFORE the letters-only fallback)
-  const fixed = joined
-    .replace(/\b[Ss]\s*h\.?\b/g, "5h")
-    .replace(/\b[Ss]h\.?\b/g, "5h");
-
-  // Time like 7h / 13 h. / 5 m. / 1 d.
-  const m = fixed.match(/\b(\d{1,2})\s*([mhd])\.?\b/i);
-  if (m) return `${parseInt(m[1], 10)}${m[2].toLowerCase()}`;
-
-  // Letters-only fallback: OCR often turns Online into "SE", "SEE", "TERN", etc.
-  const alpha = fixed.replace(/[^A-Za-z]/g, "");
-  if (alpha.length >= 2 && alpha.length <= 10) return "Online";
-
-  return "n/a";
-}
-
 function cleanName(words) {
-  let s = words.join(" ")
+  let s = words
+    .join(" ")
     .replace(/[“”]/g, '"')
     .replace(/\u00A0/g, " ")
     .replace(/[|]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 
-  // Strip leading bullets/junk
   s = s.replace(/^[^\w]+/g, "").trim();
-
-  // Strip row index patterns: "3) Name", "3. Name", "3 - Name", "3: Name"
   s = s.replace(/^\d+\s*[\)\.\:\-—–]\s*/g, "");
-
-  // Strip single-letter / 1-2 char junk tokens: "B- Name", "x Name"
   s = s.replace(/^[A-Za-z]{1,2}\s*[\)\.\:\-—–]\s*/g, "");
-
-  // Strip plain "3 Name"
   s = s.replace(/^\d+\s+/g, "");
-
   return s.trim();
 }
 
-// PATCH: drop 1–2 letter junk like Ey/Wy/NF + fix Donn/Boss OCR typos
 function cleanRank(words) {
-  const s = words.join(" ")
+  const s = words
+    .join(" ")
     .replace(/[“”]/g, '"')
     .replace(/\u00A0/g, " ")
     .replace(/[|]/g, " ")
@@ -320,14 +104,8 @@ function cleanRank(words) {
     .replace(/\s+/g, " ")
     .trim();
 
-  // Drop 1–2 letter junk tokens (badge/icon noise)
-  cleaned = cleaned
-    .split(" ")
-    .filter(t => t.length >= 3)
-    .join(" ")
-    .trim();
+  cleaned = cleaned.split(" ").filter(t => t.length >= 3).join(" ").trim();
 
-  // Fix common OCR glitches
   cleaned = cleaned
     .replace(/\bPONN\b/g, "DONN")
     .replace(/\bPON\b/g, "DONN")
@@ -338,20 +116,19 @@ function cleanRank(words) {
   return titleCase(cleaned);
 }
 
-function rowsToCsv(rows) {
-  const header = "name,lvl,rank,honor,activity";
-  const lines = [header];
-  for (const r of rows) {
-    const q = (v) => `"${String(v ?? "").replaceAll('"', '""')}"`;
-    lines.push([q(r.name), r.lvl, q(r.rank), r.honor, q(r.activity)].join(","));
-  }
-  return lines.join("\n");
+function digitsOnly(token) {
+  const s = String(token || "").trim();
+  if (!s) return null;
+  if (/[A-Za-z]/.test(s)) return null;
+  const d = s.replace(/[^\d]/g, "");
+  return d ? parseInt(d, 10) : null;
 }
 
-// Simple Levenshtein for rank matching
 function levenshtein(a, b) {
-  a = (a || ""); b = (b || "");
-  const m = a.length, n = b.length;
+  a = a || "";
+  b = b || "";
+  const m = a.length;
+  const n = b.length;
   if (!m) return n;
   if (!n) return m;
   const dp = new Array(n + 1);
@@ -367,6 +144,83 @@ function levenshtein(a, b) {
     }
   }
   return dp[n];
+}
+
+function isOnlineLike(text) {
+  const t = String(text || "").toLowerCase().replace(/[^a-z]/g, "");
+  if (!t) return false;
+  if (t.includes("online")) return true;
+  // common OCR: orline / onl1ne / onlinc / onlne / orlne
+  const d = levenshtein(t, "online");
+  return d <= 2;
+}
+
+function normalizeActivityFromTokens(tokens) {
+  const joined = tokens.join(" ").replace(/\s+/g, " ").trim();
+  if (!joined) return "n/a";
+
+  if (/\bonline\b/i.test(joined)) return "Online";
+  if (isOnlineLike(joined)) return "Online";
+
+  const fixed = joined
+    .replace(/\b[Ss]\s*h\.?\b/g, "5h")
+    .replace(/\b[Ss]h\.?\b/g, "5h");
+
+  const m = fixed.match(/\b(\d{1,2})\s*([mhd])\.?\b/i);
+  if (m) return `${parseInt(m[1], 10)}${m[2].toLowerCase()}`;
+
+  // If OCR splits "Or" "ine"
+  const alpha = fixed.replace(/[^A-Za-z]/g, "");
+  if (alpha.length >= 4 && alpha.length <= 10 && isOnlineLike(alpha)) return "Online";
+
+  return "n/a";
+}
+
+function rowsToCsv(rows) {
+  const header = "name,lvl,rank,honor,activity";
+  const lines = [header];
+  for (const r of rows) {
+    const q = v => `"${String(v ?? "").replaceAll('"', '""')}"`;
+    lines.push([q(r.name), r.lvl, q(r.rank), r.honor, q(r.activity)].join(","));
+  }
+  return lines.join("\n");
+}
+
+// ---------------------------
+// Ranks
+// ---------------------------
+const DEFAULT_RANKS = [
+  "Gang Leader",
+  "Deputy",
+  "Cutthroat",
+  "Fighter",
+  "Trainee",
+  "Newbie",
+  "Boss",
+  "Donn",
+  "Godfather",
+  "Top Executives",
+  "Generals",
+  "Top Shooters",
+  "Foot Soldiers",
+  "Youngan",
+];
+
+function getRankList() {
+  const user = (ranksEl?.value || "")
+    .split(/\r?\n/)
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  const seen = new Set();
+  const out = [];
+  for (const r of [...user, ...DEFAULT_RANKS]) {
+    const k = r.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(r);
+  }
+  return out;
 }
 
 function bestRankMatch(rankText, rankList) {
@@ -386,102 +240,215 @@ function bestRankMatch(rankText, rankList) {
       best = r;
     }
   }
-
-  // Snap only if reasonably close
   if (best && bestScore <= 3) return best;
   return raw;
 }
 
-const DEFAULT_RANKS = [
-  "Gang Leader",
-  "Deputy",
-  "Cutthroat",
-  "Fighter",
-  "Trainee",
-  "Newbie",
-  "Boss",
-  "Donn",
-  "Godfather",
-  "Top Executives",
-  "Generals",
-  "Top Shooters",
-  "Foot Soldiers",
-];
+function loadRanks() {
+  if (!ranksEl) return;
+  const saved = localStorage.getItem("osrp_ranks") || "";
+  const defaults = DEFAULT_RANKS.join("\n");
+  if (saved.trim()) ranksEl.value = saved.trim();
+  else if (!ranksEl.value.trim()) ranksEl.value = defaults;
+}
 
-function getRankList() {
-  const user = (ranksEl?.value || "")
-    .split(/\r?\n/)
-    .map(s => s.trim())
-    .filter(Boolean);
-
-  // merge + de-dupe (case-insensitive)
-  const seen = new Set();
-  const out = [];
-  for (const r of [...user, ...DEFAULT_RANKS]) {
-    const k = r.toLowerCase();
-    if (seen.has(k)) continue;
-    seen.add(k);
-    out.push(r);
+function saveRanks() {
+  if (!ranksEl) return;
+  try {
+    localStorage.setItem("osrp_ranks", (ranksEl.value || "").trim());
+    setStatus("Ranks saved.");
+  } catch (e) {
+    console.error(e);
+    setStatus("Ranks NOT saved (browser blocked storage / private mode).");
   }
+}
+
+if (saveRanksBtn) saveRanksBtn.addEventListener("click", saveRanks);
+loadRanks();
+
+// ---------------------------
+// Canvas utilities
+// ---------------------------
+function makeCanvas(w, h) {
+  const c = document.createElement("canvas");
+  c.width = Math.max(1, Math.floor(w));
+  c.height = Math.max(1, Math.floor(h));
+  return c;
+}
+
+function drawCropFromCropper() {
+  // Avoid Cropper.getCroppedCanvas() hangs on iPad by doing manual crop.
+  // cropper.getData(true) is in the image's natural coordinate space.
+  const d = cropper.getData(true);
+  const sx = Math.max(0, d.x);
+  const sy = Math.max(0, d.y);
+  const sw = Math.max(1, d.width);
+  const sh = Math.max(1, d.height);
+
+  const out = makeCanvas(sw, sh);
+  const ctx = out.getContext("2d");
+  ctx.drawImage(imgEl, sx, sy, sw, sh, 0, 0, out.width, out.height);
   return out;
 }
 
-// ---------------------------
-// Preprocess
-// ---------------------------
-function preprocessCanvas(srcCanvas) {
-  const MAX_SIDE = 1600;
-  const MAX_PIXELS = 2_200_000;
-
+function resizeForOCR(srcCanvas) {
+  // Keep iPad Safari stable (limit pixels)
+  const MAX_W = 1400;
+  const MAX_H = 900;
   const sw = srcCanvas.width;
   const sh = srcCanvas.height;
-
-  let scale = 2.0;
-
-  const sideScale = Math.min(MAX_SIDE / sw, MAX_SIDE / sh);
-  const pixelScale = Math.sqrt(MAX_PIXELS / (sw * sh));
-
-  scale = Math.min(scale, sideScale, pixelScale);
-  scale = Math.max(0.6, Math.min(2.0, scale));
-
+  const scale = Math.min(MAX_W / sw, MAX_H / sh, 1);
   const w = Math.max(1, Math.floor(sw * scale));
   const h = Math.max(1, Math.floor(sh * scale));
-
-  const out = document.createElement("canvas");
-  out.width = w;
-  out.height = h;
-
+  const out = makeCanvas(w, h);
   const ctx = out.getContext("2d", { willReadFrequently: true });
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = "high";
   ctx.drawImage(srcCanvas, 0, 0, w, h);
+  return out;
+}
 
-  const img = ctx.getImageData(0, 0, w, h);
-  const data = img.data;
-
-  let sum = 0;
-  for (let i = 0; i < data.length; i += 4) {
-    const y = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114);
-    sum += y;
+function toGrayscaleCanvas(srcCanvas, contrast = 1.25) {
+  const out = makeCanvas(srcCanvas.width, srcCanvas.height);
+  const ctx = out.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(srcCanvas, 0, 0);
+  const img = ctx.getImageData(0, 0, out.width, out.height);
+  const d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const y = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+    const v = clamp((y - 128) * contrast + 128, 0, 255);
+    d[i] = d[i + 1] = d[i + 2] = v;
+    d[i + 3] = 255;
   }
-  const mean = sum / (data.length / 4);
-  const thr = Math.min(225, Math.max(125, mean - 25));
-
-  for (let i = 0; i < data.length; i += 4) {
-    const y = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114);
-    const v = y > thr ? 255 : 0;
-    data[i] = v;
-    data[i + 1] = v;
-    data[i + 2] = v;
-    data[i + 3] = 255;
-  }
-
   ctx.putImageData(img, 0, 0);
   return out;
 }
 
+function otsuThreshold(grayCanvas) {
+  const ctx = grayCanvas.getContext("2d", { willReadFrequently: true });
+  const { width: w, height: h } = grayCanvas;
+  const data = ctx.getImageData(0, 0, w, h).data;
+  const hist = new Uint32Array(256);
+  for (let i = 0; i < data.length; i += 4) hist[data[i]]++;
+
+  const total = w * h;
+  let sum = 0;
+  for (let t = 0; t < 256; t++) sum += t * hist[t];
+
+  let sumB = 0;
+  let wB = 0;
+  let wF = 0;
+  let varMax = 0;
+  let threshold = 140;
+
+  for (let t = 0; t < 256; t++) {
+    wB += hist[t];
+    if (wB === 0) continue;
+    wF = total - wB;
+    if (wF === 0) break;
+
+    sumB += t * hist[t];
+    const mB = sumB / wB;
+    const mF = (sum - sumB) / wF;
+
+    const varBetween = wB * wF * (mB - mF) * (mB - mF);
+    if (varBetween > varMax) {
+      varMax = varBetween;
+      threshold = t;
+    }
+  }
+  return clamp(threshold, 90, 210);
+}
+
+function binarizeWithOtsu(grayCanvas) {
+  const out = makeCanvas(grayCanvas.width, grayCanvas.height);
+  const ctx = out.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(grayCanvas, 0, 0);
+  const img = ctx.getImageData(0, 0, out.width, out.height);
+  const d = img.data;
+  const thr = otsuThreshold(grayCanvas);
+  for (let i = 0; i < d.length; i += 4) {
+    const v = d[i] > thr ? 255 : 0;
+    d[i] = d[i + 1] = d[i + 2] = v;
+    d[i + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  return out;
+}
+
+function cropCanvas(src, x, y, w, h) {
+  const out = makeCanvas(w, h);
+  const ctx = out.getContext("2d");
+  ctx.drawImage(src, x, y, w, h, 0, 0, out.width, out.height);
+  return out;
+}
+
 // ---------------------------
-// Word-box parsing
+// Green "Online" detector (OCR-independent)
+// ---------------------------
+function greenOnlineInRect(srcCanvas, x, y, w, h) {
+  x = clamp(x, 0, srcCanvas.width - 1);
+  y = clamp(y, 0, srcCanvas.height - 1);
+  w = clamp(w, 1, srcCanvas.width - x);
+  h = clamp(h, 1, srcCanvas.height - y);
+
+  const ctx = srcCanvas.getContext("2d", { willReadFrequently: true });
+  const data = ctx.getImageData(x, y, w, h).data;
+
+  let greenCount = 0;
+  let total = 0;
+
+  // Sample every 2px to keep it fast on iPad
+  const stride = 8; // 2px * 4 channels
+  for (let i = 0; i < data.length; i += stride) {
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    total++;
+    // bright-ish green and clearly greener than red/blue
+    if (g > 130 && g > r + 35 && g > b + 35) greenCount++;
+  }
+
+  const frac = total ? greenCount / total : 0;
+  return frac > 0.012; // tuned for your screenshots
+}
+
+// ---------------------------
+// Tesseract worker (single pipeline)
+// ---------------------------
+let _worker = null;
+let _busy = false;
+
+async function getWorker(logger) {
+  if (_worker) return _worker;
+  const w = await Tesseract.createWorker({ logger });
+  await w.load();
+  await w.loadLanguage("eng");
+  await w.initialize("eng");
+  // stable defaults
+  await w.setParameters({
+    preserve_interword_spaces: "1",
+    tessedit_pageseg_mode: "6",
+  });
+  _worker = w;
+  return _worker;
+}
+
+async function recognize(canvas, params = {}, logger = null) {
+  const worker = await getWorker(logger);
+  while (_busy) await new Promise(r => setTimeout(r, 20));
+  _busy = true;
+  try {
+    await worker.setParameters(params);
+    const res = await worker.recognize(canvas);
+    return res.data;
+  } finally {
+    _busy = false;
+  }
+}
+
+// ---------------------------
+// Word-box + row parsing
 // ---------------------------
 function normalizeWord(w) {
   const text = String(w.text || "").trim();
@@ -495,304 +462,156 @@ function normalizeWord(w) {
   const cx = (x0 + x1) / 2;
   const cy = (y0 + y1) / 2;
 
-  const conf = (typeof w.confidence === "number") ? w.confidence : 100;
+  const conf = typeof w.confidence === "number" ? w.confidence : 100;
   return { text, x0, x1, y0, y1, cx, cy, conf };
 }
 
-function groupIntoRows(wordBoxes) {
-  const words = wordBoxes
-    .filter(w => w && w.text && w.conf >= 25)
-    .slice()
-    .sort((a, b) => a.cy - b.cy);
+function detectTableStartX(words, canvasWidth) {
+  // If the left menu leaks into crop, find the biggest gap in x-centers
+  // and treat right side as table start (works well on your screenshots).
+  const xs = words
+    .filter(w => w.conf >= 25 && w.text && /[A-Za-z0-9]/.test(w.text))
+    .map(w => w.cx)
+    .sort((a, b) => a - b);
 
-  if (!words.length) return [];
+  if (xs.length < 20) return 0;
 
-  const heights = words.map(w => Math.max(1, w.y1 - w.y0)).sort((a, b) => a - b);
-  const mid = Math.floor(heights.length / 2);
-  const median = heights.length % 2 === 0
-    ? (heights[mid - 1] + heights[mid]) / 2
-    : heights[mid];
-  const threshold = Math.max(8, median * 0.7);
+  let bestGap = 0;
+  let bestAt = 0;
 
-  const rows = [];
-  for (const w of words) {
-    const last = rows[rows.length - 1];
-    if (!last) {
-      rows.push({ cy: w.cy, words: [w] });
-      continue;
-    }
-
-    if (Math.abs(w.cy - last.cy) <= threshold) {
-      last.words.push(w);
-      last.cy = (last.cy * (last.words.length - 1) + w.cy) / last.words.length;
-    } else {
-      rows.push({ cy: w.cy, words: [w] });
+  for (let i = 1; i < xs.length; i++) {
+    const gap = xs[i] - xs[i - 1];
+    // ignore far-right whitespace gaps
+    if (xs[i] > canvasWidth * 0.55) continue;
+    if (gap > bestGap) {
+      bestGap = gap;
+      bestAt = xs[i];
     }
   }
 
-  return rows;
+  if (bestGap > canvasWidth * 0.08) {
+    return clamp(bestAt - canvasWidth * 0.01, 0, canvasWidth * 0.5);
+  }
+  return 0;
 }
 
-function findRowBandsFromCanvas(binCanvas) {
+function findRowBands(binCanvas, xStart, xEnd) {
   const ctx = binCanvas.getContext("2d", { willReadFrequently: true });
-  const w = binCanvas.width;
-  const h = binCanvas.height;
-  const data = ctx.getImageData(0, 0, w, h).data;
+  const W = binCanvas.width;
+  const H = binCanvas.height;
+  xStart = clamp(Math.floor(xStart), 0, W - 1);
+  xEnd = clamp(Math.floor(xEnd), xStart + 1, W);
 
-  // blackFrac[y] = fraction of black pixels on that scanline
-  const blackFrac = new Float32Array(h);
+  const img = ctx.getImageData(xStart, 0, xEnd - xStart, H).data;
+  const sliceW = xEnd - xStart;
 
-  // ignore left menu area by scanning only center/right
-  const xStart = Math.floor(w * 0.18);
-  const xEnd = Math.floor(w * 0.98);
-
-  for (let y = 0; y < h; y++) {
+  const blackFrac = new Float32Array(H);
+  for (let y = 0; y < H; y++) {
     let black = 0;
-    const rowStart = y * w * 4;
-
-    for (let x = xStart; x < xEnd; x++) {
+    const rowStart = y * sliceW * 4;
+    for (let x = 0; x < sliceW; x++) {
       const i = rowStart + x * 4;
-      // binarized: black is 0
-      if (data[i] < 30) black++;
+      if (img[i] < 30) black++;
     }
-
-    blackFrac[y] = black / Math.max(1, (xEnd - xStart));
+    blackFrac[y] = black / sliceW;
   }
 
-  // Smooth it
-  const smooth = new Float32Array(h);
+  // smooth
+  const smooth = new Float32Array(H);
   const win = 5;
-  for (let y = 0; y < h; y++) {
+  for (let y = 0; y < H; y++) {
     let s = 0;
     let c = 0;
     for (let k = -win; k <= win; k++) {
       const yy = y + k;
-      if (yy < 0 || yy >= h) continue;
+      if (yy < 0 || yy >= H) continue;
       s += blackFrac[yy];
       c++;
     }
     smooth[y] = s / c;
   }
 
-  // Find "line" bands: contiguous y where smooth[y] is high
-  const lineThreshold = 0.35; // row dividers are strong black spans
+  // detect divider lines
+  const lineThreshold = 0.25;
   const lineYs = [];
   let inBand = false;
   let bandStart = 0;
-
-  for (let y = 0; y < h; y++) {
+  for (let y = 0; y < H; y++) {
     const isLine = smooth[y] >= lineThreshold;
     if (isLine && !inBand) {
       inBand = true;
       bandStart = y;
     } else if (!isLine && inBand) {
       inBand = false;
-      const bandEnd = y - 1;
-      const center = Math.floor((bandStart + bandEnd) / 2);
-      lineYs.push(center);
+      lineYs.push(Math.floor((bandStart + (y - 1)) / 2));
     }
   }
-  if (inBand) {
-    const center = Math.floor((bandStart + (h - 1)) / 2);
-    lineYs.push(center);
-  }
+  if (inBand) lineYs.push(Math.floor((bandStart + (H - 1)) / 2));
 
-  // Build row bands between lines.
-  // Add top & bottom guards.
-  const cuts = [0, ...lineYs, h];
-  cuts.sort((a, b) => a - b);
-
+  // Build row bands between divider lines; filter tiny bands
+  const cuts = [0, ...lineYs, H].sort((a, b) => a - b);
   const bands = [];
   for (let i = 0; i < cuts.length - 1; i++) {
     const y0 = cuts[i];
     const y1 = cuts[i + 1];
-    const height = y1 - y0;
-
-    // Filter out tiny bands (noise / header separators)
-    if (height < Math.max(18, h * 0.04)) continue;
-
+    const h = y1 - y0;
+    if (h < Math.max(22, H * 0.05)) continue;
     bands.push({ y0, y1 });
   }
-
   return bands;
 }
 
-function parseRowsFromWordBoxes(wordBoxes, canvasWidth, rowBands) {
-  const rankList = getRankList();
+function parseHonorFromWords(tokens, canvasWidth) {
+  const honorTokens = tokens
+    .map(x => {
+      const d = String(x.text || "").replace(/[^\d]/g, "");
+      return d ? { cx: x.cx, d } : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.cx - b.cx);
 
-  // Fixed columns by percentage (stable even if header OCR shifts)
-  const X = {
-    nameRight: canvasWidth * 0.40,
-    lvlLeft: canvasWidth * 0.40,
-    lvlRight: canvasWidth * 0.52,
-    rankLeft: canvasWidth * 0.52,
-    rankRight: canvasWidth * 0.68,
-    honorLeft: canvasWidth * 0.62,
-    honorRight: canvasWidth * 0.88,
-    activityLeft: canvasWidth * 0.84,
-  };
+  const honorCandidates = [];
+  for (let i = 0; i < honorTokens.length; i++) {
+    const cur = honorTokens[i].d;
+    if (cur.length >= 3) honorCandidates.push(parseInt(cur, 10));
 
-  const out = [];
-
-  for (const band of rowBands) {
-    const w = wordBoxes
-      .filter(x => x.cy >= band.y0 && x.cy <= band.y1)
-      .filter(x => x && x.text && x.conf >= 25)
-      .sort((a, b) => a.cx - b.cx);
-
-    if (!w.length) continue;
-
-    // Drop header-ish band(s)
-    const line = w.map(x => x.text).join(" ").toLowerCase();
-    if (/(members|lvl|member\s*ranks|honor|points|activity)/i.test(line)) continue;
-
-    // Name
-    const nameWords = w.filter(x => x.cx < X.nameRight).map(x => x.text);
-    const name = cleanName(nameWords);
-    if (!name || name.length < 2) continue;
-
-    // LVL (digits only inside lvl band)
-    const lvlCandidates = w
-      .filter(x => x.cx >= X.lvlLeft && x.cx <= X.lvlRight)
-      .map(x => digitsOnly(x.text))
-      .filter(n => n !== null && n >= 1 && n <= 99);
-
-    if (!lvlCandidates.length) continue;
-    const lvl = lvlCandidates[0];
-
-    // Rank (letters inside rank band)
-    const rankWords = w
-      .filter(x => x.cx >= X.rankLeft && x.cx <= X.rankRight)
-      .filter(x => /[A-Za-z]/.test(x.text))
-      .map(x => x.text);
-
-    let rank = cleanRank(rankWords);
-    rank = bestRankMatch(rank, rankList);
-
-    // Honor (stitch split numbers, take max)
-    const honorTokens = w
-      .filter(x => x.cx >= X.honorLeft && x.cx <= X.honorRight)
-      .map(x => {
-        const d = String(x.text || "").replace(/[^\d]/g, "");
-        return d ? { cx: x.cx, d } : null;
-      })
-      .filter(Boolean)
-      .sort((a, b) => a.cx - b.cx);
-
-    const honorCandidates = [];
-    for (let i = 0; i < honorTokens.length; i++) {
-      const cur = honorTokens[i].d;
-
-      if (cur.length >= 3) honorCandidates.push(parseInt(cur, 10));
-
-      if (cur.length <= 2 && i + 1 < honorTokens.length) {
-        const nxt = honorTokens[i + 1].d;
-        const dx = honorTokens[i + 1].cx - honorTokens[i].cx;
-        if (nxt.length >= 3 && dx <= canvasWidth * 0.08) {
-          honorCandidates.push(parseInt(cur + nxt, 10));
-        }
+    if (cur.length <= 2 && i + 1 < honorTokens.length) {
+      const nxt = honorTokens[i + 1].d;
+      const dx = honorTokens[i + 1].cx - honorTokens[i].cx;
+      if (nxt.length >= 3 && dx <= canvasWidth * 0.08) {
+        honorCandidates.push(parseInt(cur + nxt, 10));
       }
     }
-    const honor = honorCandidates.length ? Math.max(...honorCandidates) : 0;
-
-    // Activity (right side)
-    const activityTokens = w
-      .filter(x => x.cx >= X.activityLeft)
-      .map(x => x.text);
-
-    const activity = normalizeActivityFromTokens(activityTokens);
-
-    out.push({ name, lvl, rank: rank || "", honor, activity });
   }
 
-  // De-dup by name (best for your use case)
-  const map = new Map();
-  for (const r of out) {
-    const k = (r.name || "").toLowerCase().trim();
-    if (!k) continue;
+  return honorCandidates.length ? Math.max(...honorCandidates) : 0;
+}
 
-    if (!map.has(k)) map.set(k, r);
-    else {
-      const prev = map.get(k);
-      prev.honor = Math.max(prev.honor || 0, r.honor || 0);
-      if (r.activity && r.activity !== "n/a") prev.activity = r.activity;
-      if (r.rank && r.rank.trim()) prev.rank = r.rank;
-      prev.lvl = r.lvl ?? prev.lvl;
-    }
-  }
-
-  return Array.from(map.values());
+function parseLvlFromWords(tokens) {
+  const nums = tokens
+    .map(x => digitsOnly(x.text))
+    .filter(n => n !== null && n >= 1 && n <= 99);
+  return nums.length ? nums[0] : null;
 }
 
 // ---------------------------
-// OCR
-// ---------------------------
-async function doOCR(canvas) {
-  setStatus("OCR running…");
-  const { data } = await Tesseract.recognize(canvas, "eng", {
-    logger: (m) => {
-      if (m.status) {
-        const pct = m.progress ? ` (${Math.round(m.progress * 100)}%)` : "";
-        setStatus(`${m.status}${pct}`);
-      }
-    },
-  });
-  return data;
-}
-
-// ---------------------------
-// Ranks persistence
-// ---------------------------
-function loadRanks() {
-  if (!ranksEl) return;
-  const saved = localStorage.getItem("osrp_ranks") || "";
-
-  const defaults = DEFAULT_RANKS.join("\n");
-
-  if (saved.trim()) {
-    ranksEl.value = saved.trim();
-  } else if (!ranksEl.value.trim()) {
-    ranksEl.value = defaults;
-  }
-}
-
-function saveRanks() {
-  if (!ranksEl) return;
-  try {
-    localStorage.setItem("osrp_ranks", (ranksEl.value || "").trim());
-    setStatus("Ranks saved.");
-  } catch (e) {
-    console.error("localStorage blocked:", e);
-    setStatus("Ranks NOT saved (browser blocked storage / private mode).");
-  }
-}
-
-if (saveRanksBtn) saveRanksBtn.addEventListener("click", saveRanks);
-loadRanks();
-
-// ---------------------------
-// CSV download
+// UI / file handling
 // ---------------------------
 function downloadCsv(filename, csvText) {
   const blob = new Blob([csvText], { type: "text/csv;charset=utf-8" });
   const url = URL.createObjectURL(blob);
-
   const a = document.createElement("a");
   a.href = url;
   a.download = filename;
   document.body.appendChild(a);
   a.click();
   a.remove();
-
   URL.revokeObjectURL(url);
 }
 
 downloadBtn?.addEventListener("click", () => {
   const csv = (csvEl.value || "").trim();
-  if (!csv) {
-    alert("No CSV to download.");
-    return;
-  }
+  if (!csv) return alert("No CSV to download.");
   const d = new Date();
   const yyyy = d.getFullYear();
   const mm = String(d.getMonth() + 1).padStart(2, "0");
@@ -800,9 +619,6 @@ downloadBtn?.addEventListener("click", () => {
   downloadCsv(`members_${yyyy}-${mm}-${dd}.csv`, csv);
 });
 
-// ---------------------------
-// UI wiring
-// ---------------------------
 if (appendBtn) {
   appendBtn.addEventListener("click", () => {
     appendMode = true;
@@ -823,7 +639,10 @@ fileEl.addEventListener("change", () => {
     setStatus("Appending image… crop and Extract to add rows.");
   }
 
-  if (cropper) { cropper.destroy(); cropper = null; }
+  if (cropper) {
+    cropper.destroy();
+    cropper = null;
+  }
   if (currentObjectUrl) URL.revokeObjectURL(currentObjectUrl);
 
   currentObjectUrl = URL.createObjectURL(f);
@@ -860,56 +679,33 @@ extractBtn.addEventListener("click", async () => {
 
   try {
     setStatus("Preparing crop…");
-    const cropped = cropper.getCroppedCanvas({
-      imageSmoothingEnabled: true,
-      imageSmoothingQuality: "high",
-      maxWidth: 1600,
-      maxHeight: 1000,
-      fillColor: "#000",
-    });
+    await new Promise(r => setTimeout(r, 0)); // let UI paint (iPad)
 
-    if (!cropped) {
-      setStatus("Crop failed. Reload the page and try again.");
-      return;
-    }
+    const cropped = drawCropFromCropper();
+    const scaled = resizeForOCR(cropped);
 
-    // Build base at safe size
     setStatus("Preprocessing…");
-    const base = preprocessCanvas(cropped);           // binary-ish, safe sized (your capped scaler)
-    const textCanvas = preprocessForText(base);       // grayscale contrast (keeps green Online readable)
-    const digitsCanvas = preprocessForDigits(base);   // strong binarize for digits
+    const gray = toGrayscaleCanvas(scaled, 1.28);
+    const bin = binarizeWithOtsu(gray);
 
-    // Row bands from binary image
-    const bands = findRowBandsFromCanvas(digitsCanvas);
-    if (!bands.length) {
-      setStatus("Could not detect rows. Crop closer to the table.");
-      return;
-    }
-
-    // OCR pass A (text)
-    setStatus("OCR (text)…");
-    const dataText = await recognizeCanvas(textCanvas, {
-      whitelist: null,
-      psm: 6,
-      numericMode: false,
-      logger: (m) => {
-        if (m.status) {
+    setStatus("OCR…");
+    const data = await recognize(
+      gray,
+      {
+        tessedit_pageseg_mode: "6",
+        // allow full text/digits
+        tessedit_char_whitelist: "",
+        preserve_interword_spaces: "1",
+      },
+      m => {
+        if (m?.status) {
           const pct = m.progress ? ` (${Math.round(m.progress * 100)}%)` : "";
           setStatus(`${m.status}${pct}`);
         }
-      }
-    });
+      },
+    );
 
-    // OCR pass B (digits)
-    setStatus("OCR (digits)…");
-    const dataDigits = await recognizeCanvas(digitsCanvas, {
-      whitelist: "0123456789",
-      psm: 6,
-      numericMode: true,
-    });
-
-    // Raw OCR text debug (append aware)
-    const rawBlock = (dataText.text || "").trim();
+    const rawBlock = (data.text || "").trim();
     if (appendMode) {
       if (rawBlock) allRawBlocks.push(rawBlock);
       rawEl.value = allRawBlocks.join("\n\n---\n\n");
@@ -918,123 +714,96 @@ extractBtn.addEventListener("click", async () => {
       rawEl.value = rawBlock;
     }
 
-    const wordsText = (dataText.words || []).map(normalizeWord).filter(Boolean);
-    const wordsDigits = (dataDigits.words || []).map(normalizeWord).filter(Boolean);
-
-    if (!wordsText.length) {
-      setStatus("No OCR words found. Try a clearer screenshot.");
+    const wordBoxes = (data.words || []).map(normalizeWord).filter(Boolean);
+    if (!wordBoxes.length) {
+      setStatus("No OCR words found. Use a clearer screenshot (send as file, not compressed).");
       return;
     }
 
-    // Compute table bounds using per-band word mins/maxes (ignores menu)
-    function median(arr) {
-      const a = arr.slice().sort((x, y) => x - y);
-      if (!a.length) return null;
-      return a[Math.floor(a.length / 2)];
-    }
+    // Auto-detect table start (handles accidental left-menu crop)
+    const tableStartX = detectTableStartX(wordBoxes, gray.width);
+    const tableEndX = gray.width; // crop should include right side
+    const tableWidth = tableEndX - tableStartX;
 
-    const lefts = [];
-    const rights = [];
-
-    for (const b of bands) {
-      const bandWords = wordsText.filter(w => w.cy >= b.y0 && w.cy <= b.y1 && w.conf >= 25);
-      if (!bandWords.length) continue;
-      lefts.push(Math.min(...bandWords.map(w => w.x0)));
-      rights.push(Math.max(...bandWords.map(w => w.x1)));
-    }
-
-    const tableLeft = median(lefts) ?? (textCanvas.width * 0.05);
-    const tableRight = median(rights) ?? (textCanvas.width * 0.98);
-    const tableW = Math.max(50, tableRight - tableLeft);
-
-    // column boundaries relative to detected table box
-    const X = {
-      nameR: tableLeft + tableW * 0.42,
-      lvlL:  tableLeft + tableW * 0.42,
-      lvlR:  tableLeft + tableW * 0.53,
-      rankL: tableLeft + tableW * 0.53,
-      rankR: tableLeft + tableW * 0.70,
-      honL:  tableLeft + tableW * 0.70,
-      honR:  tableLeft + tableW * 0.88,
-      actL:  tableLeft + tableW * 0.85,
+    // Column layout relative to table area
+    const COL = {
+      nameR: tableStartX + tableWidth * 0.40,
+      lvlL: tableStartX + tableWidth * 0.40,
+      lvlR: tableStartX + tableWidth * 0.52,
+      rankL: tableStartX + tableWidth * 0.52,
+      rankR: tableStartX + tableWidth * 0.70,
+      honL: tableStartX + tableWidth * 0.70,
+      honR: tableStartX + tableWidth * 0.88,
+      actL: tableStartX + tableWidth * 0.86,
+      actR: tableStartX + tableWidth * 0.99,
     };
+
+    setStatus("Finding rows…");
+    const bands = findRowBands(bin, tableStartX, tableEndX);
+    if (!bands.length) {
+      setStatus("No rows detected. Crop tighter around the table area and try again.");
+      return;
+    }
 
     const rankList = getRankList();
     const out = [];
 
-    setStatus("Parsing rows…");
+    setStatus("Reading rows…");
+    for (const band of bands) {
+      const rowWords = wordBoxes
+        .filter(w => w.cy >= band.y0 && w.cy <= band.y1)
+        .filter(w => w.conf >= 25)
+        .sort((a, b) => a.cx - b.cx);
 
-    for (const b of bands) {
-      const rowText = wordsText
-        .filter(w => w.cy >= b.y0 && w.cy <= b.y1 && w.conf >= 25)
-        .sort((a, z) => a.cx - z.cx);
+      if (!rowWords.length) continue;
 
-      const rowDigits = wordsDigits
-        .filter(w => w.cy >= b.y0 && w.cy <= b.y1 && w.conf >= 25)
-        .sort((a, z) => a.cx - z.cx);
+      const line = rowWords.map(w => w.text).join(" ").toLowerCase();
+      if (/(members|lvl|member\s*ranks|honor|points|activity)/i.test(line) && rowWords.length <= 18) continue;
 
-      if (!rowText.length) continue;
-
-      const line = rowText.map(w => w.text).join(" ").toLowerCase();
-      if (/(members|lvl|member\s*ranks|honor|points|activity)/i.test(line)) continue;
-
-      const nameWords = rowText.filter(w => w.cx < X.nameR).map(w => w.text);
+      // Name
+      const nameWords = rowWords.filter(w => w.cx >= tableStartX && w.cx <= COL.nameR).map(w => w.text);
       const name = cleanName(nameWords);
       if (!name || name.length < 2) continue;
 
-      const lvlNums = rowDigits
-        .filter(w => w.cx >= X.lvlL && w.cx <= X.lvlR)
-        .map(w => digitsOnly(w.text))
-        .filter(n => n !== null && n >= 1 && n <= 99);
+      // LVL (from words)
+      const lvlWords = rowWords.filter(w => w.cx >= COL.lvlL && w.cx <= COL.lvlR);
+      const lvl = parseLvlFromWords(lvlWords);
+      if (!lvl) continue;
 
-      if (!lvlNums.length) continue;
-      const lvl = lvlNums[0];
-
-      const rankWords = rowText
-        .filter(w => w.cx >= X.rankL && w.cx <= X.rankR)
+      // Rank
+      const rankWords = rowWords
+        .filter(w => w.cx >= COL.rankL && w.cx <= COL.rankR)
         .filter(w => /[A-Za-z]/.test(w.text))
         .map(w => w.text);
 
       let rank = cleanRank(rankWords);
       rank = bestRankMatch(rank, rankList);
 
-      // Honor stitching from digits pass
-      const honorTokens = rowDigits
-        .filter(w => w.cx >= X.honL && w.cx <= X.honR)
-        .map(w => {
-          const d = String(w.text || "").replace(/[^\d]/g, "");
-          return d ? { cx: w.cx, d } : null;
-        })
-        .filter(Boolean)
-        .sort((a, z) => a.cx - z.cx);
+      // Honor (from words)
+      const honorWords = rowWords.filter(w => w.cx >= COL.honL && w.cx <= COL.honR);
+      const honor = parseHonorFromWords(honorWords, gray.width);
 
-      const honorCandidates = [];
-      for (let i = 0; i < honorTokens.length; i++) {
-        const cur = honorTokens[i].d;
-        if (cur.length >= 3) honorCandidates.push(parseInt(cur, 10));
-        if (cur.length <= 2 && i + 1 < honorTokens.length) {
-          const nxt = honorTokens[i + 1].d;
-          const dx = honorTokens[i + 1].cx - honorTokens[i].cx;
-          if (nxt.length >= 3 && dx <= textCanvas.width * 0.08) {
-            honorCandidates.push(parseInt(cur + nxt, 10));
-          }
-        }
+      // Activity
+      // First: detect green "Online" by pixels (most reliable).
+      const y0 = Math.floor(band.y0);
+      const y1 = Math.ceil(band.y1);
+      const rectX = Math.floor(COL.actL);
+      const rectW = Math.floor(Math.max(2, COL.actR - COL.actL));
+      const rectH = Math.floor(Math.max(2, y1 - y0));
+
+      let activity = "n/a";
+      if (greenOnlineInRect(scaled, rectX, y0, rectW, rectH)) {
+        activity = "Online";
+      } else {
+        const actWords = rowWords.filter(w => w.cx >= COL.actL && w.cx <= COL.actR).map(w => w.text);
+        activity = normalizeActivityFromTokens(actWords);
       }
-      const honor = honorCandidates.length ? Math.max(...honorCandidates) : 0;
-
-      const actText = rowText.filter(w => w.cx >= X.actL).map(w => w.text).join(" ");
-      const activity = parseActivity(actText);
 
       out.push({ name, lvl, rank: rank || "", honor, activity });
     }
 
-    if (!out.length) {
-      setStatus("No rows parsed. Crop closer to the table area and retry.");
-      return;
-    }
-
-    // merge/dedup
-    const map = new Map(allRows.map(r => [(r.name || "").toLowerCase().trim(), r]));
+    // De-dup by name
+    const map = new Map();
     for (const r of out) {
       const k = (r.name || "").toLowerCase().trim();
       if (!k) continue;
@@ -1048,16 +817,28 @@ extractBtn.addEventListener("click", async () => {
       }
     }
 
-    allRows = Array.from(map.values());
-    csvEl.value = rowsToCsv(allRows);
+    const rows = Array.from(map.values());
+    if (!rows.length) {
+      setStatus("No rows detected. Crop tighter around ONLY the table and try again.");
+      return;
+    }
 
+    if (appendMode) {
+      const merged = new Map(allRows.map(r => [(r.name || "").toLowerCase().trim(), r]));
+      for (const r of rows) merged.set((r.name || "").toLowerCase().trim(), r);
+      allRows = Array.from(merged.values());
+    } else {
+      allRows = rows.slice();
+    }
+
+    csvEl.value = rowsToCsv(allRows);
     setStatus(`Total ${allRows.length} row(s) in CSV. ${appendMode ? "Appended." : "Extracted."}`);
     copyBtn.disabled = false;
     downloadBtn.disabled = false;
     appendMode = false;
   } catch (e) {
     console.error(e);
-    setStatus("OCR failed. Try a clearer screenshot or crop closer to the table.");
+    setStatus("OCR failed. If it hangs, refresh the page and try again (iPad Safari can get stuck).");
   } finally {
     extractBtn.disabled = false;
   }
