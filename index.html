@@ -6,7 +6,7 @@
   <title>OSRP Gang Scanner → CSV</title>
 
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/cropperjs@1.6.2/dist/cropper.min.css">
-  <link rel="stylesheet" href="./style.css?v=18" />
+  <link rel="stylesheet" href="./style.css?v=19" />
 </head>
 
 <body>
@@ -21,6 +21,16 @@
         <button id="copyCsvBtn" type="button" disabled>Copy CSV</button>
         <button id="downloadCsvBtn" type="button" disabled>Download CSV</button>
         <button id="clear" disabled>Clear</button>
+      </div>
+      <div class="row ocr-row">
+        <label class="checkbox">
+          <input id="ocrSpaceEnabled" type="checkbox" />
+          Use OCR.space (cloud OCR)
+        </label>
+        <input id="ocrSpaceKey" type="password" placeholder="OCR.space API key (stored locally)" />
+      </div>
+      <div class="hint">
+        OCR.space keeps OCR off your device. Images are sent to a third-party API. Free tier has limits.
       </div>
 
       <div class="grid">
@@ -77,6 +87,6 @@
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 
   <!-- Your app last -->
-  <script src="./app.js?v=18"></script>
+  <script src="./app.js?v=19"></script>
 </body>
 </html>
