@@ -1,7 +1,7 @@
 // OSRP Gang Scanner -> CSV (robust word-box parsing for mobile/desktop)
 // Drop-in app.js
 
-const BUILD = "v15"; // bump when you deploy
+const BUILD = "v16"; // bump when you deploy
 document.title = `OSRP Gang Scanner → CSV (${BUILD})`;
 
 const fileEl = document.getElementById("file");
@@ -106,33 +106,53 @@ function preprocessForDigits(srcCanvas) {
 }
 
 let _worker = null;
+let _workerBusy = false;
+
 async function getWorker(logger) {
   if (_worker) return _worker;
 
-  if (Tesseract?.createWorker) {
-    const w = await Tesseract.createWorker({ logger });
-    await w.loadLanguage("eng");
-    await w.initialize("eng");
-    _worker = w;
-    return _worker;
-  }
+  if (!Tesseract?.createWorker) return null;
 
-  return null;
+  const w = await Tesseract.createWorker({ logger });
+
+  // CRITICAL for tesseract.js v5
+  await w.load();
+  await w.loadLanguage("eng");
+  await w.initialize("eng");
+
+  _worker = w;
+  return _worker;
 }
 
 async function recognizeCanvas(canvas, { whitelist = null, logger = null } = {}) {
   const worker = await getWorker(logger);
 
-  const options = {};
-  if (whitelist) options.tessedit_char_whitelist = whitelist;
-
-  if (worker) {
-    const res = await worker.recognize(canvas, options);
+  // Fallback to old API if worker isn’t available
+  if (!worker) {
+    const res = await Tesseract.recognize(canvas, "eng", { logger });
     return res.data;
   }
 
-  const res = await Tesseract.recognize(canvas, "eng", { logger, ...options });
-  return res.data;
+  // Prevent overlapping recognizes on iPad Safari (it can hang)
+  while (_workerBusy) {
+    await new Promise(r => setTimeout(r, 25));
+  }
+  _workerBusy = true;
+
+  try {
+    // tesseract.js v5 requires setParameters (NOT recognize options)
+    if (whitelist) {
+      await worker.setParameters({ tessedit_char_whitelist: whitelist });
+    } else {
+      // clear whitelist so text mode can read letters again
+      await worker.setParameters({ tessedit_char_whitelist: "" });
+    }
+
+    const res = await worker.recognize(canvas);
+    return res.data;
+  } finally {
+    _workerBusy = false;
+  }
 }
 
 function parseFirstInt(text) {
