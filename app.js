@@ -1,7 +1,7 @@
 // OSRP Gang Scanner -> CSV (robust word-box parsing for mobile/desktop)
 // Drop-in app.js
 
-const BUILD = "v17"; // bump when you deploy
+const BUILD = "v18"; // bump when you deploy
 document.title = `OSRP Gang Scanner → CSV (${BUILD})`;
 
 const fileEl = document.getElementById("file");
@@ -124,7 +124,12 @@ async function getWorker(logger) {
   return _worker;
 }
 
-async function recognizeCanvas(canvas, { whitelist = null, logger = null } = {}) {
+async function recognizeCanvas(canvas, {
+  whitelist = null,
+  logger = null,
+  psm = 6,
+  numericMode = false,
+} = {}) {
   const worker = await getWorker(logger);
 
   // Fallback to old API if worker isn’t available
@@ -133,20 +138,18 @@ async function recognizeCanvas(canvas, { whitelist = null, logger = null } = {})
     return res.data;
   }
 
-  // Prevent overlapping recognizes on iPad Safari (it can hang)
   while (_workerBusy) {
     await new Promise(r => setTimeout(r, 25));
   }
   _workerBusy = true;
 
   try {
-    // tesseract.js v5 requires setParameters (NOT recognize options)
-    if (whitelist) {
-      await worker.setParameters({ tessedit_char_whitelist: whitelist });
-    } else {
-      // clear whitelist so text mode can read letters again
-      await worker.setParameters({ tessedit_char_whitelist: "" });
-    }
+    const params = {
+      tessedit_pageseg_mode: String(psm),
+      classify_bln_numeric_mode: numericMode ? "1" : "0",
+      tessedit_char_whitelist: whitelist ? whitelist : "",
+    };
+    await worker.setParameters(params);
 
     const res = await worker.recognize(canvas);
     return res.data;
@@ -172,13 +175,45 @@ function parseHonorInt(text) {
   return Number.isFinite(stitched) ? stitched : 0;
 }
 
-function parseActivity(text) {
-  const t = String(text || "").trim();
-  if (!t) return "n/a";
-  if (/\bonline\b/i.test(t)) return "Online";
-  if (/^(on|0n|onl|0nl|onli|0nli)$/i.test(t.replace(/\s+/g, ""))) return "Online";
+function levenshteinSimple(a, b) {
+  a = (a || ""); b = (b || "");
+  const m = a.length, n = b.length;
+  if (!m) return n;
+  if (!n) return m;
+  const dp = new Array(n + 1);
+  for (let j = 0; j <= n; j++) dp[j] = j;
+  for (let i = 1; i <= m; i++) {
+    let prev = dp[0];
+    dp[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const tmp = dp[j];
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[j] = Math.min(dp[j] + 1, dp[j - 1] + 1, prev + cost);
+      prev = tmp;
+    }
+  }
+  return dp[n];
+}
 
-  const m = t.match(/\b(\d{1,2})\s*([mhd])\b/i);
+function parseActivity(text) {
+  const t0 = String(text || "").trim();
+  if (!t0) return "n/a";
+
+  // normalize
+  const t = t0.replace(/\s+/g, " ").trim();
+  const letters = t.toLowerCase().replace(/[^a-z]/g, "");
+
+  // Direct + fuzzy Online match
+  if (/\bonline\b/i.test(t)) return "Online";
+  if (letters.length >= 4 && letters.length <= 10) {
+    // catches: onine, orline, 0nline, ouline, etc.
+    const d = levenshteinSimple(letters, "online");
+    if (d <= 2) return "Online";
+    if (letters.includes("onl")) return "Online";
+  }
+
+  // time: 7m / 5h / 1d (allow dot)
+  const m = t.match(/\b(\d{1,2})\s*([mhd])\.?\b/i);
   if (m) return `${parseInt(m[1], 10)}${m[2].toLowerCase()}`;
 
   return "n/a";
@@ -507,15 +542,21 @@ function findRowBandsFromCanvas(binCanvas) {
   // blackFrac[y] = fraction of black pixels on that scanline
   const blackFrac = new Float32Array(h);
 
+  // ignore left menu area by scanning only center/right
+  const xStart = Math.floor(w * 0.18);
+  const xEnd = Math.floor(w * 0.98);
+
   for (let y = 0; y < h; y++) {
     let black = 0;
     const rowStart = y * w * 4;
-    for (let x = 0; x < w; x++) {
+
+    for (let x = xStart; x < xEnd; x++) {
       const i = rowStart + x * 4;
       // binarized: black is 0
       if (data[i] < 30) black++;
     }
-    blackFrac[y] = black / w;
+
+    blackFrac[y] = black / Math.max(1, (xEnd - xStart));
   }
 
   // Smooth it
@@ -828,17 +869,47 @@ extractBtn.addEventListener("click", async () => {
     });
 
     if (!cropped) {
-      setStatus("Crop failed. Try reloading the page.");
+      setStatus("Crop failed. Reload the page and try again.");
       return;
     }
 
+    // Build base at safe size
     setStatus("Preprocessing…");
-    const preText = preprocessCanvas(cropped);
+    const base = preprocessCanvas(cropped);           // binary-ish, safe sized (your capped scaler)
+    const textCanvas = preprocessForText(base);       // grayscale contrast (keeps green Online readable)
+    const digitsCanvas = preprocessForDigits(base);   // strong binarize for digits
 
-    setStatus("OCR running…");
-    const data = await doOCR(preText);
+    // Row bands from binary image
+    const bands = findRowBandsFromCanvas(digitsCanvas);
+    if (!bands.length) {
+      setStatus("Could not detect rows. Crop closer to the table.");
+      return;
+    }
 
-    const rawBlock = (data.text || "").trim();
+    // OCR pass A (text)
+    setStatus("OCR (text)…");
+    const dataText = await recognizeCanvas(textCanvas, {
+      whitelist: null,
+      psm: 6,
+      numericMode: false,
+      logger: (m) => {
+        if (m.status) {
+          const pct = m.progress ? ` (${Math.round(m.progress * 100)}%)` : "";
+          setStatus(`${m.status}${pct}`);
+        }
+      }
+    });
+
+    // OCR pass B (digits)
+    setStatus("OCR (digits)…");
+    const dataDigits = await recognizeCanvas(digitsCanvas, {
+      whitelist: "0123456789",
+      psm: 6,
+      numericMode: true,
+    });
+
+    // Raw OCR text debug (append aware)
+    const rawBlock = (dataText.text || "").trim();
     if (appendMode) {
       if (rawBlock) allRawBlocks.push(rawBlock);
       rawEl.value = allRawBlocks.join("\n\n---\n\n");
@@ -847,102 +918,123 @@ extractBtn.addEventListener("click", async () => {
       rawEl.value = rawBlock;
     }
 
-    const wordBoxes = (data.words || []).map(normalizeWord).filter(Boolean);
-    if (!wordBoxes.length) {
-      setStatus("No OCR words found. Try a cleaner screenshot.");
+    const wordsText = (dataText.words || []).map(normalizeWord).filter(Boolean);
+    const wordsDigits = (dataDigits.words || []).map(normalizeWord).filter(Boolean);
+
+    if (!wordsText.length) {
+      setStatus("No OCR words found. Try a clearer screenshot.");
       return;
     }
 
-    const grouped = groupIntoRows(wordBoxes);
-    if (!grouped.length) {
-      setStatus("No rows detected. Crop tighter around the table.");
-      return;
+    // Compute table bounds using per-band word mins/maxes (ignores menu)
+    function median(arr) {
+      const a = arr.slice().sort((x, y) => x - y);
+      if (!a.length) return null;
+      return a[Math.floor(a.length / 2)];
     }
 
-    const W = cropped.width;
-    const H = cropped.height;
+    const lefts = [];
+    const rights = [];
 
-    const COL = {
-      nameL: 0.08,
-      nameR: 0.43,
-      lvlL: 0.43,
-      lvlR: 0.52,
-      rankL: 0.52,
-      rankR: 0.70,
-      honorL: 0.70,
-      honorR: 0.87,
-      actL: 0.87,
-      actR: 0.995,
+    for (const b of bands) {
+      const bandWords = wordsText.filter(w => w.cy >= b.y0 && w.cy <= b.y1 && w.conf >= 25);
+      if (!bandWords.length) continue;
+      lefts.push(Math.min(...bandWords.map(w => w.x0)));
+      rights.push(Math.max(...bandWords.map(w => w.x1)));
+    }
+
+    const tableLeft = median(lefts) ?? (textCanvas.width * 0.05);
+    const tableRight = median(rights) ?? (textCanvas.width * 0.98);
+    const tableW = Math.max(50, tableRight - tableLeft);
+
+    // column boundaries relative to detected table box
+    const X = {
+      nameR: tableLeft + tableW * 0.42,
+      lvlL:  tableLeft + tableW * 0.42,
+      lvlR:  tableLeft + tableW * 0.53,
+      rankL: tableLeft + tableW * 0.53,
+      rankR: tableLeft + tableW * 0.70,
+      honL:  tableLeft + tableW * 0.70,
+      honR:  tableLeft + tableW * 0.88,
+      actL:  tableLeft + tableW * 0.85,
     };
 
     const rankList = getRankList();
     const out = [];
 
-    setStatus("Reading rows…");
+    setStatus("Parsing rows…");
 
-    for (const row of grouped) {
-      const yTop = Math.max(0, Math.min(...row.words.map(w => w.y0)));
-      const yBot = Math.min(preText.height, Math.max(...row.words.map(w => w.y1)));
-      const line = row.words.map(w => w.text).join(" ").toLowerCase();
-      const looksLikeHeader = /(members|lvl|member\s*ranks|honor|points|activity)/i.test(line);
-      const hasANameToken = row.words.some(w => w.cx < preText.width * 0.35 && /[A-Za-z]/.test(w.text));
-      if (looksLikeHeader && !hasANameToken) continue;
+    for (const b of bands) {
+      const rowText = wordsText
+        .filter(w => w.cy >= b.y0 && w.cy <= b.y1 && w.conf >= 25)
+        .sort((a, z) => a.cx - z.cx);
 
-      const nameWords = row.words
-        .filter(w => w.cx >= preText.width * COL.nameL && w.cx <= preText.width * COL.nameR)
-        .map(w => w.text);
+      const rowDigits = wordsDigits
+        .filter(w => w.cy >= b.y0 && w.cy <= b.y1 && w.conf >= 25)
+        .sort((a, z) => a.cx - z.cx);
 
+      if (!rowText.length) continue;
+
+      const line = rowText.map(w => w.text).join(" ").toLowerCase();
+      if (/(members|lvl|member\s*ranks|honor|points|activity)/i.test(line)) continue;
+
+      const nameWords = rowText.filter(w => w.cx < X.nameR).map(w => w.text);
       const name = cleanName(nameWords);
       if (!name || name.length < 2) continue;
 
-      const rankWords = row.words
-        .filter(w => w.cx >= preText.width * COL.rankL && w.cx <= preText.width * COL.rankR)
+      const lvlNums = rowDigits
+        .filter(w => w.cx >= X.lvlL && w.cx <= X.lvlR)
+        .map(w => digitsOnly(w.text))
+        .filter(n => n !== null && n >= 1 && n <= 99);
+
+      if (!lvlNums.length) continue;
+      const lvl = lvlNums[0];
+
+      const rankWords = rowText
+        .filter(w => w.cx >= X.rankL && w.cx <= X.rankR)
         .filter(w => /[A-Za-z]/.test(w.text))
         .map(w => w.text);
 
       let rank = cleanRank(rankWords);
       rank = bestRankMatch(rank, rankList);
 
-      const yScale = cropped.height / preText.height;
-      const cyTop = Math.floor(yTop * yScale);
-      const cyBot = Math.ceil(yBot * yScale);
-      const padY = Math.floor((cyBot - cyTop) * 0.15);
-      const rTop = clamp(cyTop - padY, 0, H - 1);
-      const rBot = clamp(cyBot + padY, rTop + 1, H);
-      const rowHeight = rBot - rTop;
+      // Honor stitching from digits pass
+      const honorTokens = rowDigits
+        .filter(w => w.cx >= X.honL && w.cx <= X.honR)
+        .map(w => {
+          const d = String(w.text || "").replace(/[^\d]/g, "");
+          return d ? { cx: w.cx, d } : null;
+        })
+        .filter(Boolean)
+        .sort((a, z) => a.cx - z.cx);
 
-      async function ocrCell(xL, xR, mode) {
-        const x = Math.floor(W * xL);
-        const w = Math.max(2, Math.floor(W * xR) - x);
-        const cell = cropCanvas(cropped, x, rTop, w, rowHeight);
-
-        if (mode === "digits") {
-          const pre = preprocessForDigits(cell);
-          const d = await recognizeCanvas(pre, { whitelist: "0123456789" });
-          return (d.text || "").trim();
+      const honorCandidates = [];
+      for (let i = 0; i < honorTokens.length; i++) {
+        const cur = honorTokens[i].d;
+        if (cur.length >= 3) honorCandidates.push(parseInt(cur, 10));
+        if (cur.length <= 2 && i + 1 < honorTokens.length) {
+          const nxt = honorTokens[i + 1].d;
+          const dx = honorTokens[i + 1].cx - honorTokens[i].cx;
+          if (nxt.length >= 3 && dx <= textCanvas.width * 0.08) {
+            honorCandidates.push(parseInt(cur + nxt, 10));
+          }
         }
-
-        const pre = preprocessForText(cell);
-        const d = await recognizeCanvas(pre, {
-          whitelist: "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.mhdONonli ",
-        });
-        return (d.text || "").trim();
       }
+      const honor = honorCandidates.length ? Math.max(...honorCandidates) : 0;
 
-      const lvlText = await ocrCell(COL.lvlL, COL.lvlR, "digits");
-      const honorText = await ocrCell(COL.honorL, COL.honorR, "digits");
-      const actText = await ocrCell(COL.actL, COL.actR, "text");
-
-      const lvl = parseFirstInt(lvlText);
-      if (!lvl || lvl < 1 || lvl > 99) continue;
-
-      const honor = parseHonorInt(honorText);
+      const actText = rowText.filter(w => w.cx >= X.actL).map(w => w.text).join(" ");
       const activity = parseActivity(actText);
 
       out.push({ name, lvl, rank: rank || "", honor, activity });
     }
 
-    const map = new Map();
+    if (!out.length) {
+      setStatus("No rows parsed. Crop closer to the table area and retry.");
+      return;
+    }
+
+    // merge/dedup
+    const map = new Map(allRows.map(r => [(r.name || "").toLowerCase().trim(), r]));
     for (const r of out) {
       const k = (r.name || "").toLowerCase().trim();
       if (!k) continue;
@@ -950,34 +1042,22 @@ extractBtn.addEventListener("click", async () => {
       else {
         const prev = map.get(k);
         prev.honor = Math.max(prev.honor || 0, r.honor || 0);
-        prev.activity = (r.activity && r.activity !== "n/a") ? r.activity : prev.activity;
-        prev.rank = (r.rank && r.rank.trim()) ? r.rank : prev.rank;
+        if (r.activity && r.activity !== "n/a") prev.activity = r.activity;
+        if (r.rank && r.rank.trim()) prev.rank = r.rank;
         prev.lvl = r.lvl ?? prev.lvl;
       }
     }
 
-    const rows = Array.from(map.values());
-    if (!rows.length) {
-      setStatus("No rows detected. Crop tighter around ONLY the rows and try again.");
-      return;
-    }
-
-    if (appendMode) {
-      const merged = new Map(allRows.map(r => [(r.name || "").toLowerCase().trim(), r]));
-      for (const r of rows) merged.set((r.name || "").toLowerCase().trim(), r);
-      allRows = Array.from(merged.values());
-    } else {
-      allRows = rows.slice();
-    }
-
+    allRows = Array.from(map.values());
     csvEl.value = rowsToCsv(allRows);
+
     setStatus(`Total ${allRows.length} row(s) in CSV. ${appendMode ? "Appended." : "Extracted."}`);
     copyBtn.disabled = false;
     downloadBtn.disabled = false;
     appendMode = false;
   } catch (e) {
     console.error(e);
-    setStatus("OCR failed. Try cropping tighter or use a clearer screenshot.");
+    setStatus("OCR failed. Try a clearer screenshot or crop closer to the table.");
   } finally {
     extractBtn.disabled = false;
   }
