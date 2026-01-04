@@ -1,7 +1,7 @@
 // OSRP Gang Scanner -> CSV (robust word-box parsing for mobile/desktop)
 // Drop-in app.js
 
-const BUILD = "v14"; // bump when you deploy
+const BUILD = "v15"; // bump when you deploy
 document.title = `OSRP Gang Scanner → CSV (${BUILD})`;
 
 const fileEl = document.getElementById("file");
@@ -26,6 +26,143 @@ let allRows = [];
 let allRawBlocks = [];
 
 function setStatus(t) { statusEl.textContent = t; }
+
+function clamp(n, a, b) {
+  return Math.max(a, Math.min(b, n));
+}
+
+function cropCanvas(srcCanvas, x, y, w, h) {
+  const out = document.createElement("canvas");
+  out.width = Math.max(1, Math.floor(w));
+  out.height = Math.max(1, Math.floor(h));
+  const ctx = out.getContext("2d");
+  ctx.drawImage(srcCanvas, x, y, w, h, 0, 0, out.width, out.height);
+  return out;
+}
+
+function preprocessForText(srcCanvas) {
+  const scale = 2.2;
+  const w = Math.max(1, Math.floor(srcCanvas.width * scale));
+  const h = Math.max(1, Math.floor(srcCanvas.height * scale));
+  const out = document.createElement("canvas");
+  out.width = w;
+  out.height = h;
+
+  const ctx = out.getContext("2d", { willReadFrequently: true });
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(srcCanvas, 0, 0, w, h);
+
+  const img = ctx.getImageData(0, 0, w, h);
+  const d = img.data;
+
+  for (let i = 0; i < d.length; i += 4) {
+    const y = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+    const v = clamp((y - 128) * 1.35 + 128, 0, 255);
+    d[i] = v;
+    d[i + 1] = v;
+    d[i + 2] = v;
+    d[i + 3] = 255;
+  }
+
+  ctx.putImageData(img, 0, 0);
+  return out;
+}
+
+function preprocessForDigits(srcCanvas) {
+  const scale = 2.6;
+  const w = Math.max(1, Math.floor(srcCanvas.width * scale));
+  const h = Math.max(1, Math.floor(srcCanvas.height * scale));
+  const out = document.createElement("canvas");
+  out.width = w;
+  out.height = h;
+
+  const ctx = out.getContext("2d", { willReadFrequently: true });
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(srcCanvas, 0, 0, w, h);
+
+  const img = ctx.getImageData(0, 0, w, h);
+  const d = img.data;
+
+  let sum = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    sum += d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+  }
+  const mean = sum / (d.length / 4);
+  const thr = clamp(mean - 18, 110, 210);
+
+  for (let i = 0; i < d.length; i += 4) {
+    const y = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+    const v = y > thr ? 255 : 0;
+    d[i] = v;
+    d[i + 1] = v;
+    d[i + 2] = v;
+    d[i + 3] = 255;
+  }
+
+  ctx.putImageData(img, 0, 0);
+  return out;
+}
+
+let _worker = null;
+async function getWorker(logger) {
+  if (_worker) return _worker;
+
+  if (Tesseract?.createWorker) {
+    const w = await Tesseract.createWorker({ logger });
+    await w.loadLanguage("eng");
+    await w.initialize("eng");
+    _worker = w;
+    return _worker;
+  }
+
+  return null;
+}
+
+async function recognizeCanvas(canvas, { whitelist = null, logger = null } = {}) {
+  const worker = await getWorker(logger);
+
+  const options = {};
+  if (whitelist) options.tessedit_char_whitelist = whitelist;
+
+  if (worker) {
+    const res = await worker.recognize(canvas, options);
+    return res.data;
+  }
+
+  const res = await Tesseract.recognize(canvas, "eng", { logger, ...options });
+  return res.data;
+}
+
+function parseFirstInt(text) {
+  const m = String(text || "").match(/\d{1,3}/);
+  return m ? parseInt(m[0], 10) : null;
+}
+
+function parseHonorInt(text) {
+  const digits = String(text || "").match(/\d+/g);
+  if (!digits) return 0;
+
+  const nums = digits.map(s => parseInt(s, 10)).filter(n => Number.isFinite(n));
+  const big = nums.filter(n => n >= 1000);
+  if (big.length) return Math.max(...big);
+
+  const stitched = parseInt(digits.join(""), 10);
+  return Number.isFinite(stitched) ? stitched : 0;
+}
+
+function parseActivity(text) {
+  const t = String(text || "").trim();
+  if (!t) return "n/a";
+  if (/\bonline\b/i.test(t)) return "Online";
+  if (/^(on|0n|onl|0nl|onli|0nli)$/i.test(t.replace(/\s+/g, ""))) return "Online";
+
+  const m = t.match(/\b(\d{1,2})\s*([mhd])\b/i);
+  if (m) return `${parseInt(m[1], 10)}${m[2].toLowerCase()}`;
+
+  return "n/a";
+}
 
 function cleanupImage() {
   if (cropper) { cropper.destroy(); cropper = null; }
@@ -304,6 +441,40 @@ function normalizeWord(w) {
 
   const conf = (typeof w.confidence === "number") ? w.confidence : 100;
   return { text, x0, x1, y0, y1, cx, cy, conf };
+}
+
+function groupIntoRows(wordBoxes) {
+  const words = wordBoxes
+    .filter(w => w && w.text && w.conf >= 25)
+    .slice()
+    .sort((a, b) => a.cy - b.cy);
+
+  if (!words.length) return [];
+
+  const heights = words.map(w => Math.max(1, w.y1 - w.y0)).sort((a, b) => a - b);
+  const mid = Math.floor(heights.length / 2);
+  const median = heights.length % 2 === 0
+    ? (heights[mid - 1] + heights[mid]) / 2
+    : heights[mid];
+  const threshold = Math.max(8, median * 0.7);
+
+  const rows = [];
+  for (const w of words) {
+    const last = rows[rows.length - 1];
+    if (!last) {
+      rows.push({ cy: w.cy, words: [w] });
+      continue;
+    }
+
+    if (Math.abs(w.cy - last.cy) <= threshold) {
+      last.words.push(w);
+      last.cy = (last.cy * (last.words.length - 1) + w.cy) / last.words.length;
+    } else {
+      rows.push({ cy: w.cy, words: [w] });
+    }
+  }
+
+  return rows;
 }
 
 function findRowBandsFromCanvas(binCanvas) {
@@ -632,26 +803,17 @@ extractBtn.addEventListener("click", async () => {
       imageSmoothingQuality: "high",
     });
 
-    // Grayscale + contrast normalization (preserves Online + digits)
-    const preText = preprocessCanvas(cropped);
+    const preText = preprocessForText(cropped);
 
-    const data = await doOCR(preText);
+    const data = await recognizeCanvas(preText, {
+      logger: (m) => {
+        if (m.status) {
+          const pct = m.progress ? ` (${Math.round(m.progress * 100)}%)` : "";
+          setStatus(`${m.status}${pct}`);
+        }
+      },
+    });
 
-    const wordBoxes = (data.words || []).map(normalizeWord).filter(Boolean);
-
-    if (!wordBoxes.length) {
-      setStatus("No OCR words found. Try a clearer screenshot.");
-      return;
-    }
-
-    const rowBands = findRowBandsFromCanvas(preText);
-    const rows = parseRowsFromWordBoxes(wordBoxes, preText.width, rowBands);
-    if (!rows.length) {
-      setStatus("No rows detected. Crop tighter around ONLY the rows and try again.");
-      return;
-    }
-
-    // Raw OCR
     const rawBlock = (data.text || "").trim();
     if (appendMode) {
       if (rawBlock) allRawBlocks.push(rawBlock);
@@ -661,37 +823,133 @@ extractBtn.addEventListener("click", async () => {
       rawEl.value = rawBlock;
     }
 
-    // Merge rows when appending
-    function keyRow(r) {
-      return (r.name || "").toLowerCase().trim();
+    const wordBoxes = (data.words || []).map(normalizeWord).filter(Boolean);
+    if (!wordBoxes.length) {
+      setStatus("No OCR words found. Try a cleaner screenshot.");
+      return;
+    }
+
+    const grouped = groupIntoRows(wordBoxes);
+    if (!grouped.length) {
+      setStatus("No rows detected. Crop tighter around the table.");
+      return;
+    }
+
+    const W = cropped.width;
+    const H = cropped.height;
+
+    const COL = {
+      nameL: 0.08,
+      nameR: 0.43,
+      lvlL: 0.43,
+      lvlR: 0.52,
+      rankL: 0.52,
+      rankR: 0.70,
+      honorL: 0.70,
+      honorR: 0.87,
+      actL: 0.87,
+      actR: 0.995,
+    };
+
+    const rankList = getRankList();
+    const out = [];
+
+    setStatus("Reading rows…");
+
+    for (const row of grouped) {
+      const yTop = Math.max(0, Math.min(...row.words.map(w => w.y0)));
+      const yBot = Math.min(preText.height, Math.max(...row.words.map(w => w.y1)));
+      const line = row.words.map(w => w.text).join(" ").toLowerCase();
+      const looksLikeHeader = /(members|lvl|member\s*ranks|honor|points|activity)/i.test(line);
+      const hasANameToken = row.words.some(w => w.cx < preText.width * 0.35 && /[A-Za-z]/.test(w.text));
+      if (looksLikeHeader && !hasANameToken) continue;
+
+      const nameWords = row.words
+        .filter(w => w.cx >= preText.width * COL.nameL && w.cx <= preText.width * COL.nameR)
+        .map(w => w.text);
+
+      const name = cleanName(nameWords);
+      if (!name || name.length < 2) continue;
+
+      const rankWords = row.words
+        .filter(w => w.cx >= preText.width * COL.rankL && w.cx <= preText.width * COL.rankR)
+        .filter(w => /[A-Za-z]/.test(w.text))
+        .map(w => w.text);
+
+      let rank = cleanRank(rankWords);
+      rank = bestRankMatch(rank, rankList);
+
+      const yScale = cropped.height / preText.height;
+      const cyTop = Math.floor(yTop * yScale);
+      const cyBot = Math.ceil(yBot * yScale);
+      const padY = Math.floor((cyBot - cyTop) * 0.15);
+      const rTop = clamp(cyTop - padY, 0, H - 1);
+      const rBot = clamp(cyBot + padY, rTop + 1, H);
+      const rowHeight = rBot - rTop;
+
+      async function ocrCell(xL, xR, mode) {
+        const x = Math.floor(W * xL);
+        const w = Math.max(2, Math.floor(W * xR) - x);
+        const cell = cropCanvas(cropped, x, rTop, w, rowHeight);
+
+        if (mode === "digits") {
+          const pre = preprocessForDigits(cell);
+          const d = await recognizeCanvas(pre, { whitelist: "0123456789" });
+          return (d.text || "").trim();
+        }
+
+        const pre = preprocessForText(cell);
+        const d = await recognizeCanvas(pre, {
+          whitelist: "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.mhdONonli ",
+        });
+        return (d.text || "").trim();
+      }
+
+      const lvlText = await ocrCell(COL.lvlL, COL.lvlR, "digits");
+      const honorText = await ocrCell(COL.honorL, COL.honorR, "digits");
+      const actText = await ocrCell(COL.actL, COL.actR, "text");
+
+      const lvl = parseFirstInt(lvlText);
+      if (!lvl || lvl < 1 || lvl > 99) continue;
+
+      const honor = parseHonorInt(honorText);
+      const activity = parseActivity(actText);
+
+      out.push({ name, lvl, rank: rank || "", honor, activity });
+    }
+
+    const map = new Map();
+    for (const r of out) {
+      const k = (r.name || "").toLowerCase().trim();
+      if (!k) continue;
+      if (!map.has(k)) map.set(k, r);
+      else {
+        const prev = map.get(k);
+        prev.honor = Math.max(prev.honor || 0, r.honor || 0);
+        prev.activity = (r.activity && r.activity !== "n/a") ? r.activity : prev.activity;
+        prev.rank = (r.rank && r.rank.trim()) ? r.rank : prev.rank;
+        prev.lvl = r.lvl ?? prev.lvl;
+      }
+    }
+
+    const rows = Array.from(map.values());
+    if (!rows.length) {
+      setStatus("No rows detected. Crop tighter around ONLY the rows and try again.");
+      return;
     }
 
     if (appendMode) {
-      const map = new Map(allRows.map(r => [keyRow(r), r]));
-      for (const r of rows) {
-        const k = keyRow(r);
-        if (!k) continue;
-
-        if (!map.has(k)) {
-          map.set(k, r);
-        } else {
-          const prev = map.get(k);
-          prev.lvl = r.lvl ?? prev.lvl;
-          prev.rank = (r.rank && r.rank.trim()) ? r.rank : prev.rank;
-          prev.activity = (r.activity && r.activity !== "n/a") ? r.activity : prev.activity;
-          prev.honor = Math.max(prev.honor || 0, r.honor || 0);
-        }
-      }
-      allRows = Array.from(map.values());
+      const merged = new Map(allRows.map(r => [(r.name || "").toLowerCase().trim(), r]));
+      for (const r of rows) merged.set((r.name || "").toLowerCase().trim(), r);
+      allRows = Array.from(merged.values());
     } else {
       allRows = rows.slice();
     }
 
     csvEl.value = rowsToCsv(allRows);
-    setStatus(`Total ${allRows.length} row(s) in CSV. ${appendMode ? "Appended." : "Extracted."} (${BUILD})`);
+    setStatus(`Total ${allRows.length} row(s) in CSV. ${appendMode ? "Appended." : "Extracted."}`);
     copyBtn.disabled = false;
     downloadBtn.disabled = false;
-
     appendMode = false;
   } catch (e) {
     console.error(e);
