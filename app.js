@@ -1,4 +1,4 @@
-// OSRP Gang Scanner -> CSV (mobile-stable v18)
+// OSRP Gang Scanner -> CSV (mobile-stable v19)
 // Key changes:
 // - ONE Tesseract worker only (no Tesseract.recognize())
 // - Row detection from horizontal divider lines (less crop sensitivity)
@@ -6,7 +6,7 @@
 // - Otsu threshold for digits (reduces 6->8 flips)
 // - Auto-detect table start even if menu leaks into crop
 
-const BUILD = "v18";
+const BUILD = "v19";
 document.title = `OSRP Gang Scanner → CSV (${BUILD})`;
 
 const fileEl = document.getElementById("file");
@@ -19,6 +19,8 @@ const csvEl = document.getElementById("csv");
 const rawEl = document.getElementById("raw");
 const statusEl = document.getElementById("status");
 const appendBtn = document.getElementById("appendImageBtn");
+const ocrSpaceToggle = document.getElementById("ocrSpaceEnabled");
+const ocrSpaceKeyEl = document.getElementById("ocrSpaceKey");
 
 const ranksEl = document.getElementById("ranks") || document.getElementById("gangRanks");
 const saveRanksBtn = document.getElementById("saveRanksBtn");
@@ -267,6 +269,37 @@ if (saveRanksBtn) saveRanksBtn.addEventListener("click", saveRanks);
 loadRanks();
 
 // ---------------------------
+// OCR.space settings
+// ---------------------------
+const OCR_SPACE_URL = "https://api.ocr.space/parse/image";
+
+function loadOcrSpaceSettings() {
+  if (!ocrSpaceToggle || !ocrSpaceKeyEl) return;
+  try {
+    const enabled = localStorage.getItem("osrp_ocrspace_enabled");
+    const key = localStorage.getItem("osrp_ocrspace_key");
+    if (enabled !== null) ocrSpaceToggle.checked = enabled === "true";
+    if (key) ocrSpaceKeyEl.value = key;
+  } catch (e) {
+    console.warn("OCR.space settings not loaded:", e);
+  }
+}
+
+function saveOcrSpaceSettings() {
+  if (!ocrSpaceToggle || !ocrSpaceKeyEl) return;
+  try {
+    localStorage.setItem("osrp_ocrspace_enabled", String(ocrSpaceToggle.checked));
+    localStorage.setItem("osrp_ocrspace_key", (ocrSpaceKeyEl.value || "").trim());
+  } catch (e) {
+    console.warn("OCR.space settings not saved:", e);
+  }
+}
+
+if (ocrSpaceToggle) ocrSpaceToggle.addEventListener("change", saveOcrSpaceSettings);
+if (ocrSpaceKeyEl) ocrSpaceKeyEl.addEventListener("input", saveOcrSpaceSettings);
+loadOcrSpaceSettings();
+
+// ---------------------------
 // Canvas utilities
 // ---------------------------
 function makeCanvas(w, h) {
@@ -411,6 +444,76 @@ function greenOnlineInRect(srcCanvas, x, y, w, h) {
 
   const frac = total ? greenCount / total : 0;
   return frac > 0.012; // tuned for your screenshots
+}
+
+// ---------------------------
+// OCR.space (cloud OCR)
+// ---------------------------
+async function canvasToBlob(canvas, type = "image/png") {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(blob => {
+      if (!blob) reject(new Error("Failed to encode image."));
+      else resolve(blob);
+    }, type);
+  });
+}
+
+async function ocrSpaceRequest(canvas, apiKey, filename = "image.png") {
+  if (!apiKey) throw new Error("Missing OCR.space API key.");
+
+  const blob = await canvasToBlob(canvas);
+  const form = new FormData();
+  form.append("apikey", apiKey);
+  form.append("language", "eng");
+  form.append("isOverlayRequired", "true");
+  form.append("detectOrientation", "true");
+  form.append("scale", "true");
+  form.append("OCREngine", "2");
+  form.append("file", blob, filename);
+
+  const resp = await fetch(OCR_SPACE_URL, { method: "POST", body: form });
+  const text = await resp.text();
+  if (!resp.ok) {
+    throw new Error(`OCR.space HTTP ${resp.status}: ${text.slice(0, 400)}`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    throw new Error(`OCR.space returned non-JSON: ${text.slice(0, 400)}`);
+  }
+}
+
+function ocrSpaceToWordBoxes(payload) {
+  if (payload?.IsErroredOnProcessing) {
+    const msg = payload?.ErrorMessage || payload?.ErrorDetails || "unknown_ocrspace_error";
+    throw new Error(Array.isArray(msg) ? msg.join(", ") : msg);
+  }
+
+  const results = payload?.ParsedResults || [];
+  if (!results.length) return { rawText: "", words: [] };
+  const r0 = results[0];
+  const rawText = (r0.ParsedText || "").trim();
+
+  const lines = r0?.TextOverlay?.Lines || [];
+  const words = [];
+
+  for (const line of lines) {
+    for (const w of line?.Words || []) {
+      const text = String(w?.WordText || "").trim();
+      if (!text) continue;
+      const x0 = Number(w.Left || 0);
+      const y0 = Number(w.Top || 0);
+      const width = Number(w.Width || 0);
+      const height = Number(w.Height || 0);
+      const x1 = x0 + width;
+      const y1 = y0 + height;
+      const cx = (x0 + x1) / 2;
+      const cy = (y0 + y1) / 2;
+      words.push({ text, x0, x1, y0, y1, cx, cy, conf: 100 });
+    }
+  }
+
+  return { rawText, words };
 }
 
 // ---------------------------
@@ -688,24 +791,49 @@ extractBtn.addEventListener("click", async () => {
     const gray = toGrayscaleCanvas(scaled, 1.28);
     const bin = binarizeWithOtsu(gray);
 
-    setStatus("OCR…");
-    const data = await recognize(
-      gray,
-      {
-        tessedit_pageseg_mode: "6",
-        // allow full text/digits
-        tessedit_char_whitelist: "",
-        preserve_interword_spaces: "1",
-      },
-      m => {
-        if (m?.status) {
-          const pct = m.progress ? ` (${Math.round(m.progress * 100)}%)` : "";
-          setStatus(`${m.status}${pct}`);
-        }
-      },
-    );
+    const requestedOcrSpace = !!ocrSpaceToggle?.checked;
+    const ocrSpaceKey = (ocrSpaceKeyEl?.value || "").trim();
+    const useOcrSpace = requestedOcrSpace && ocrSpaceKey;
+    if (requestedOcrSpace && !ocrSpaceKey) {
+      setStatus("OCR.space enabled but missing API key; using local OCR…");
+    }
+    let rawBlock = "";
+    let wordBoxes = [];
+    let ocrSpaceError = null;
 
-    const rawBlock = (data.text || "").trim();
+    if (useOcrSpace) {
+      try {
+        setStatus("Uploading to OCR.space…");
+        const payload = await ocrSpaceRequest(scaled, ocrSpaceKey, "members.png");
+        const parsed = ocrSpaceToWordBoxes(payload);
+        rawBlock = parsed.rawText || "";
+        wordBoxes = parsed.words || [];
+      } catch (e) {
+        ocrSpaceError = e;
+        console.warn("OCR.space failed:", e);
+      }
+    }
+
+    if (!wordBoxes.length) {
+      setStatus(useOcrSpace ? "OCR.space failed, trying local OCR…" : "OCR…");
+      const data = await recognize(
+        gray,
+        {
+          tessedit_pageseg_mode: "6",
+          // allow full text/digits
+          tessedit_char_whitelist: "",
+          preserve_interword_spaces: "1",
+        },
+        m => {
+          if (m?.status) {
+            const pct = m.progress ? ` (${Math.round(m.progress * 100)}%)` : "";
+            setStatus(`${m.status}${pct}`);
+          }
+        },
+      );
+      rawBlock = (data.text || "").trim();
+      wordBoxes = (data.words || []).map(normalizeWord).filter(Boolean);
+    }
     if (appendMode) {
       if (rawBlock) allRawBlocks.push(rawBlock);
       rawEl.value = allRawBlocks.join("\n\n---\n\n");
@@ -714,9 +842,9 @@ extractBtn.addEventListener("click", async () => {
       rawEl.value = rawBlock;
     }
 
-    const wordBoxes = (data.words || []).map(normalizeWord).filter(Boolean);
     if (!wordBoxes.length) {
-      setStatus("No OCR words found. Use a clearer screenshot (send as file, not compressed).");
+      const reason = ocrSpaceError ? ` (OCR.space error: ${ocrSpaceError.message || ocrSpaceError})` : "";
+      setStatus(`No OCR words found. Use a clearer screenshot (send as file, not compressed).${reason}`);
       return;
     }
 
