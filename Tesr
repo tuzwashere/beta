@@ -1,1 +1,50 @@
-twst
+You are working in an existing Expo React Native project (TypeScript). Recreate my Base44 SnackSwap app UI 1:1 from the screenshots I provide.
+
+IMPORTANT: CLEAN REBUILD (KEEP ENV ONLY)
+- Delete/remove EVERYTHING in this project and rebuild from scratch EXCEPT the environment file that contains my Supabase keys.
+- Preserve my env file exactly as-is (do not modify it, do not rename it, do not delete it). It contains:
+  EXPO_PUBLIC_SUPABASE_URL
+  EXPO_PUBLIC_SUPABASE_ANON_KEY
+- After rebuilding, the app must still read those env vars the same way it does now.
+
+GOAL
+- Match layout, spacing, typography, icon style, and dark purple theme exactly like the screenshots.
+- Implement as real screens/components (not mockups), using clean reusable components.
+
+NAVIGATION
+- Bottom tabs for buyers: Home, Cart, Orders, Messages, Settings.
+- Seller tab MUST be hidden unless the current user is a seller (role='seller').
+- When user becomes a seller, immediately navigate them to Seller Dashboard and show Seller tab.
+
+SCREENS TO IMPLEMENT (match screenshots)
+1) Home: header “SnackSwap” + school name + search bar; empty state card with CTA “Become a Seller”.
+2) Cart: empty state with icon + “Browse Snacks” button.
+3) Orders: empty state with icon + “Browse Snacks” button; later list orders.
+4) Messages: empty state + later conversation list.
+5) Settings: user card, school card, theme picker (Dark Purple default), Become Seller card, Log out button.
+6) Become Seller modal: title + explanatory text + primary button “Yes, I want to sell” + Cancel.
+7) Seller Dashboard: subscription banner, stats cards (revenue/orders/active), buttons/rows for Messages, Products, Orders; “Products” selected shows “Subscribe to Add Products” lock empty state (UI only).
+8) New Product modal: image upload area, fields (name, description, price, stock), toggle “Listed for Sale”, Cancel + Create Product buttons.
+
+DATA / STATE (FOR NOW)
+- Do NOT require real auth/login right now. Remove/disable the Gmail login page and any auth gating.
+- Use a simple local “Dev User” state with:
+  - display_name = "Gains"
+  - role = 'buyer' by default, can be toggled to 'seller' by Become Seller flow
+  - school = "Hallandale High School"
+- School selection screen should NOT block the app. If it exists, bypass it and default the school.
+
+ENGINEERING REQUIREMENTS
+- TypeScript everywhere.
+- Create a centralized theme system (colors, spacing, radius, text styles) to match screenshots.
+- Keep components small and reusable: EmptyState, PrimaryButton, Card, StatCard, ModalSheet, etc.
+- Ensure UI works on iPhone sizes (safe areas) and looks like screenshots.
+
+OUTPUT REQUIREMENTS
+- Make the necessary code changes directly in the repo.
+- Provide full code blocks for every file you create or modify.
+- List the final file structure.
+- Do NOT change config files unless absolutely required.
+- Do NOT touch the env file with my Supabase keys.
+
+After you finish, tell me exactly where to tweak text/colors if I want minor adjustments.
